@@ -1,0 +1,226 @@
+<?php
+/**
+ * Plugin Name: CashFlow Sync
+ * Plugin URI:  https://cashflow.pk
+ * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
+ * Version:     2.0.0
+ * Author:      CashFlow.pk
+ * Author URI:  https://cashflow.pk
+ * License:     GPL v2 or later
+ * Text Domain: cashflow-sync
+ * Requires at least: 5.8
+ * Requires PHP: 7.4
+ * WC requires at least: 6.0
+ */
+
+defined( 'ABSPATH' ) || exit;
+
+// ── Constants ──────────────────────────────────────────────────────
+define( 'CASHFLOW_VERSION',    '2.0.0' );
+define( 'CASHFLOW_PLUGIN_FILE', __FILE__ );
+define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
+define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
+define( 'CASHFLOW_API_BASE',    'https://cashflow-backend-706502592250.asia-south1.run.app' );
+define( 'CASHFLOW_OPTION_KEY',  'cashflow_sync_v2' );
+
+// ── Activation / Deactivation ─────────────────────────────────────
+register_activation_hook(   __FILE__, [ 'CashFlow_Plugin', 'activate'   ] );
+register_deactivation_hook( __FILE__, [ 'CashFlow_Plugin', 'deactivate' ] );
+add_action( 'plugins_loaded', [ 'CashFlow_Plugin', 'init' ] );
+
+/**
+ * Main plugin bootstrap
+ */
+class CashFlow_Plugin {
+
+    private static $instance = null;
+
+    public static function init() {
+        try {
+            if ( ! class_exists( 'WooCommerce' ) ) {
+                add_action( 'admin_notices', [ __CLASS__, 'woo_missing_notice' ] );
+                return;
+            }
+            if ( self::$instance === null ) {
+                self::$instance = new self();
+            }
+            return self::$instance;
+        } catch ( Throwable $e ) {
+            error_log( '[CashFlow Sync] Init error: ' . $e->getMessage() );
+        }
+    }
+
+    public function __construct() {
+        try {
+            // Load all files — explicit requires, no autoloader
+            $files = [
+                'admin/class-admin.php',
+                'includes/class-security.php',
+                'includes/class-statuses.php',
+                'includes/class-auth.php',
+                'includes/class-webhooks.php',
+                'includes/class-sync.php',
+                'includes/class-meta.php',
+                'includes/class-rest.php',
+            ];
+            foreach ( $files as $file ) {
+                $path = CASHFLOW_PLUGIN_DIR . $file;
+                if ( file_exists( $path ) ) {
+                    require_once $path;
+                } else {
+                    // Log missing file but don't crash
+                    error_log( '[CashFlow Sync] Missing file: ' . $path );
+                }
+            }
+
+            // Boot each module safely
+            $modules = [
+                'CashFlow_Statuses',
+                'CashFlow_Admin',
+                'CashFlow_Auth',
+                'CashFlow_Webhooks',
+                'CashFlow_Sync',
+                'CashFlow_Meta',
+                'CashFlow_REST',
+            ];
+            foreach ( $modules as $class ) {
+                if ( class_exists( $class ) ) {
+                    new $class();
+                } else {
+                    error_log( '[CashFlow Sync] Class not found: ' . $class );
+                }
+            }
+
+        } catch ( Throwable $e ) {
+            // Never crash the site — just log and disable gracefully
+            error_log( '[CashFlow Sync] Fatal error: ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine() );
+            add_action( 'admin_notices', function() use ( $e ) {
+                echo '<div class="error"><p><strong>CashFlow Sync</strong> encountered an error and has been disabled: ' . esc_html( $e->getMessage() ) . '. Please contact support.</p></div>';
+            } );
+        }
+    }
+
+    // ── Activation ─────────────────────────────────────────────────
+    public static function activate() {
+        global $wpdb;
+
+        // Sync log table
+        $table   = $wpdb->prefix . 'cashflow_sync_log';
+        $charset = $wpdb->get_charset_collate();
+        $sql = "CREATE TABLE IF NOT EXISTS $table (
+            id          BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            event_type  VARCHAR(100) NOT NULL,
+            object_type VARCHAR(50)  NOT NULL,
+            object_id   BIGINT(20)   NOT NULL DEFAULT 0,
+            status      VARCHAR(20)  NOT NULL DEFAULT 'success',
+            message     TEXT,
+            created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_event   (event_type),
+            KEY idx_object  (object_id),
+            KEY idx_created (created_at)
+        ) $charset;";
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+        dbDelta( $sql );
+
+        // Generate site secret on first activation
+        if ( ! get_option( 'cashflow_site_secret' ) ) {
+            update_option( 'cashflow_site_secret', wp_generate_password( 64, false ) );
+        }
+
+        set_transient( 'cashflow_activated', true, 30 );
+    }
+
+    public static function deactivate() {
+        $settings = self::get_settings();
+        // Webhooks stay — admin must explicitly disconnect
+        // Just clear the cron jobs
+        wp_clear_scheduled_hook( 'cashflow_push_order' );
+    }
+
+    public static function woo_missing_notice() {
+        echo '<div class="error"><p><strong>CashFlow Sync</strong> requires WooCommerce to be active.</p></div>';
+    }
+
+    // ── Settings ───────────────────────────────────────────────────
+    public static function get_settings() {
+        return wp_parse_args( get_option( CASHFLOW_OPTION_KEY, [] ), [
+            'cashflow_token'    => '',
+            'store_id'          => '',
+            'org_id'            => '',
+            'connected'         => false,
+            'connected_at'      => '',
+            'store_url'         => '',
+            'sync_orders'       => true,
+            'sync_inventory'    => true,
+            'sync_customers'    => true,
+            'sync_courier_meta' => true,
+            'bidirectional'     => true,
+        ] );
+    }
+
+    public static function save_settings( $data ) {
+        $settings = self::get_settings();
+        update_option( CASHFLOW_OPTION_KEY, array_merge( $settings, $data ) );
+    }
+
+    // ── CashFlow API request ────────────────────────────────────────
+    public static function api_request( $endpoint, $method = 'GET', $body = null, $token = null ) {
+        if ( ! $token ) {
+            $settings = self::get_settings();
+            $token    = $settings['cashflow_token'] ?? '';
+        }
+
+        $timestamp = time();
+        $nonce     = wp_generate_password( 16, false );
+        $site_secret = get_option( 'cashflow_site_secret', '' );
+
+        // HMAC signature: method + endpoint + timestamp + nonce
+        $sig_data  = $method . $endpoint . $timestamp . $nonce;
+        $signature = hash_hmac( 'sha256', $sig_data, $site_secret );
+
+        $args = [
+            'method'  => $method,
+            'headers' => [
+                'Content-Type'        => 'application/json',
+                'Authorization'       => 'Bearer ' . $token,
+                'X-CashFlow-Site'     => get_site_url(),
+                'X-CashFlow-Time'     => $timestamp,
+                'X-CashFlow-Nonce'    => $nonce,
+                'X-CashFlow-Sig'      => $signature,
+                'X-Plugin-Version'    => CASHFLOW_VERSION,
+            ],
+            'timeout'    => 30,
+            'sslverify'  => true,
+        ];
+
+        if ( $body ) {
+            $args['body'] = wp_json_encode( $body );
+        }
+
+        $response = wp_remote_request( CASHFLOW_API_BASE . $endpoint, $args );
+
+        if ( is_wp_error( $response ) ) {
+            return [ 'ok' => false, 'error' => $response->get_error_message(), 'status' => 0, 'data' => null ];
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+        $data = json_decode( wp_remote_retrieve_body( $response ), true );
+
+        return [
+            'ok'     => $code >= 200 && $code < 300,
+            'status' => $code,
+            'data'   => $data,
+        ];
+    }
+
+    // ── Sync log ───────────────────────────────────────────────────
+    public static function log( $event_type, $object_type, $object_id, $status = 'success', $message = '' ) {
+        global $wpdb;
+        $wpdb->insert(
+            $wpdb->prefix . 'cashflow_sync_log',
+            compact( 'event_type', 'object_type', 'object_id', 'status', 'message' ),
+            [ '%s', '%s', '%d', '%s', '%s' ]
+        );
+    }
+}

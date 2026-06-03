@@ -5,33 +5,28 @@ defined( 'ABSPATH' ) || exit;
  * CashFlow_Statuses
  *
  * Registers all WooCommerce order statuses required by CashFlow.pk.
- * Status set mirrors the INMX Order Flow defaults exactly — this class
- * is the authoritative source now that INMX has been removed.
+ * This class is the authoritative source — INMX plugin no longer required.
  *
  * Responsibilities:
- *  - Register custom statuses with WordPress/WooCommerce
- *  - Apply badge colours + Dashicons in WC admin
- *  - Enforce paid-status declarations
- *  - Action buttons per row (flow-aware, colored, Dashicon)
- *  - Restrict status dropdown on single order edit page
- *  - JS enforcement on orders list inline dropdowns
+ *  - Register custom statuses (booked, shipped, returned) with WordPress/WooCommerce
+ *  - Badge colours + WooCommerce font icons in WC admin orders list
+ *  - Action buttons per row, flow-aware (only allowed next statuses shown)
  *  - Bulk actions for custom statuses
- *  - Server-side hard block on invalid transitions
- *  - Provide bi-directional mapping helpers for the CashFlow sync layer
+ *  - Paid-status and analytics declarations
+ *  - Normalize() helper for CashFlow sync layer
  */
 class CashFlow_Statuses {
 
     /**
-     * Full status registry — mirrors inmx_cos_defaults() exactly.
+     * Full status registry.
      *
-     * Keys:
-     *   label       Human-readable label shown in WC admin
-     *   type        'core' (built-in WC) | 'custom' (must be registered)
-     *   color_bg    Badge background hex
-     *   color_text  Badge text/border hex
-     *   icon        Dashicons class for the badge icon and action button
-     *   paid        Whether WC should treat this status as paid
-     *   next        Allowed transition targets (slugs, no wc- prefix)
+     * type     'core' = built-in WC, no registration needed
+     *          'custom' = must be registered via register_post_status()
+     * color_bg  Badge/button background hex
+     * color_text Badge/button text + border hex
+     * glyph    WooCommerce font unicode codepoint for badge + action button icon
+     * paid     Whether WC treats this status as paid
+     * next     Allowed transition targets (slugs, no wc- prefix)
      */
     const STATUSES = [
         'pending' => [
@@ -39,7 +34,7 @@ class CashFlow_Statuses {
             'type'       => 'core',
             'color_bg'   => '#e5e5e5',
             'color_text' => '#777777',
-            'icon'       => 'dashicons-clock',
+            'glyph'      => 'e011',
             'paid'       => false,
             'next'       => [ 'processing', 'on-hold', 'cancelled' ],
         ],
@@ -48,7 +43,7 @@ class CashFlow_Statuses {
             'type'       => 'core',
             'color_bg'   => '#f8dda7',
             'color_text' => '#94660c',
-            'icon'       => 'dashicons-warning',
+            'glyph'      => 'e015',
             'paid'       => false,
             'next'       => [ 'processing', 'cancelled' ],
         ],
@@ -57,7 +52,7 @@ class CashFlow_Statuses {
             'type'       => 'core',
             'color_bg'   => '#c6e1c6',
             'color_text' => '#5b841b',
-            'icon'       => 'dashicons-update',
+            'glyph'      => 'e011',
             'paid'       => true,
             'next'       => [ 'booked', 'cancelled' ],
         ],
@@ -66,7 +61,7 @@ class CashFlow_Statuses {
             'type'       => 'custom',
             'color_bg'   => '#c8d8f0',
             'color_text' => '#1a4a8a',
-            'icon'       => 'dashicons-clipboard',
+            'glyph'      => 'e01a',
             'paid'       => true,
             'next'       => [ 'shipped', 'cancelled' ],
         ],
@@ -75,7 +70,7 @@ class CashFlow_Statuses {
             'type'       => 'custom',
             'color_bg'   => '#fde8c8',
             'color_text' => '#8a4a00',
-            'icon'       => 'dashicons-car',
+            'glyph'      => 'e01a',
             'paid'       => true,
             'next'       => [ 'completed', 'failed', 'returned' ],
         ],
@@ -84,7 +79,7 @@ class CashFlow_Statuses {
             'type'       => 'core',
             'color_bg'   => '#eba3a3',
             'color_text' => '#761919',
-            'icon'       => 'dashicons-no-alt',
+            'glyph'      => 'e014',
             'paid'       => false,
             'next'       => [ 'shipped', 'returned' ],
         ],
@@ -93,7 +88,7 @@ class CashFlow_Statuses {
             'type'       => 'custom',
             'color_bg'   => '#e8d0f0',
             'color_text' => '#5a1a8a',
-            'icon'       => 'dashicons-undo',
+            'glyph'      => 'e011',
             'paid'       => true,
             'next'       => [ 'pending', 'refunded' ],
         ],
@@ -102,7 +97,7 @@ class CashFlow_Statuses {
             'type'       => 'core',
             'color_bg'   => '#c8d7e1',
             'color_text' => '#2e4453',
-            'icon'       => 'dashicons-yes-alt',
+            'glyph'      => 'e013',
             'paid'       => true,
             'next'       => [ 'refunded' ],
         ],
@@ -111,7 +106,7 @@ class CashFlow_Statuses {
             'type'       => 'core',
             'color_bg'   => '#e5e5e5',
             'color_text' => '#777777',
-            'icon'       => 'dashicons-money-alt',
+            'glyph'      => 'e012',
             'paid'       => false,
             'next'       => [],
         ],
@@ -120,7 +115,7 @@ class CashFlow_Statuses {
             'type'       => 'core',
             'color_bg'   => '#eba3a3',
             'color_text' => '#761919',
-            'icon'       => 'dashicons-dismiss',
+            'glyph'      => 'e014',
             'paid'       => false,
             'next'       => [],
         ],
@@ -129,54 +124,33 @@ class CashFlow_Statuses {
             'type'       => 'core',
             'color_bg'   => '#e5e5e5',
             'color_text' => '#777777',
-            'icon'       => 'dashicons-edit',
+            'glyph'      => 'e011',
             'paid'       => false,
             'next'       => [ 'pending' ],
         ],
     ];
 
-    /**
-     * Dashicons class → CSS unicode codepoint.
-     * Covers all icons used in STATUSES above plus a fallback.
-     */
-    const ICON_MAP = [
-        'dashicons-clock'      => 'f469',
-        'dashicons-warning'    => 'f534',
-        'dashicons-update'     => 'f463',
-        'dashicons-clipboard'  => 'f481',
-        'dashicons-car'        => 'f513',
-        'dashicons-no-alt'     => 'f335',
-        'dashicons-undo'       => 'f171',
-        'dashicons-yes-alt'    => 'f472',
-        'dashicons-money-alt'  => 'f507',
-        'dashicons-dismiss'    => 'f153',
-        'dashicons-edit'       => 'f464',
-        'dashicons-marker'     => 'f231', // fallback
-    ];
-
     // ── Boot ────────────────────────────────────────────────────────────
     public function __construct() {
         // Status registration
-        add_action( 'init',                                 [ $this, 'register_statuses'      ] );
-        add_filter( 'wc_order_statuses',                    [ $this, 'add_to_order_statuses'  ], 20 );
-        add_filter( 'woocommerce_order_is_paid_statuses',   [ $this, 'declare_paid_statuses'  ] );
-        add_filter( 'woocommerce_reports_order_statuses',   [ $this, 'add_to_reports'         ] );
-        add_filter( 'woocommerce_analytics_order_statuses', [ $this, 'add_to_reports'         ] );
+        add_action( 'init',                                    [ $this, 'register_statuses'     ] );
+        add_filter( 'wc_order_statuses',                       [ $this, 'add_to_order_statuses' ], 20 );
+        add_filter( 'woocommerce_order_is_paid_statuses',      [ $this, 'declare_paid_statuses' ] );
+        add_filter( 'woocommerce_reports_order_statuses',      [ $this, 'add_to_reports'        ] );
+        add_filter( 'woocommerce_analytics_order_statuses',    [ $this, 'add_to_reports'        ] );
 
-        // Admin UI
-        add_action( 'admin_enqueue_scripts',                [ $this, 'enqueue_dashicons'      ] );
-        add_action( 'admin_footer',                         [ $this, 'badge_colours'          ] );
-        add_action( 'admin_footer',                         [ $this, 'action_button_css'      ] );
+        // Admin UI — admin_head to prevent flash of default WC styles
+        add_action( 'admin_head',                              [ $this, 'admin_css'             ] );
 
         // Action buttons — flow-restricted per row
-        add_filter( 'woocommerce_admin_order_actions',      [ $this, 'action_buttons'         ], 10, 2 );
+        add_filter( 'woocommerce_admin_order_actions',         [ $this, 'action_buttons'        ], 10, 2 );
 
         // Bulk actions
-        add_filter( 'bulk_actions-woocommerce_page_wc-orders', [ $this, 'bulk_actions'        ] );
-        add_filter( 'bulk_actions-edit-shop_order',            [ $this, 'bulk_actions'        ] );
-        add_filter( 'handle_bulk_actions-woocommerce_page_wc-orders', [ $this, 'handle_bulk'  ], 20, 3 );
-        add_filter( 'handle_bulk_actions-edit-shop_order',            [ $this, 'handle_bulk'  ], 20, 3 );
-        add_action( 'admin_notices',                        [ $this, 'bulk_notice'            ] );
+        add_filter( 'bulk_actions-woocommerce_page_wc-orders', [ $this, 'bulk_actions'          ] );
+        add_filter( 'bulk_actions-edit-shop_order',            [ $this, 'bulk_actions'          ] );
+        add_filter( 'handle_bulk_actions-woocommerce_page_wc-orders', [ $this, 'handle_bulk'    ], 20, 3 );
+        add_filter( 'handle_bulk_actions-edit-shop_order',     [ $this, 'handle_bulk'           ], 20, 3 );
+        add_action( 'admin_notices',                           [ $this, 'bulk_notice'           ] );
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -208,8 +182,8 @@ class CashFlow_Statuses {
     public function add_to_order_statuses( $statuses ) {
         $ordered = [];
         foreach ( self::STATUSES as $slug => $data ) {
-            $key            = 'wc-' . $slug;
-            $ordered[ $key ] = isset( $statuses[ $key ] ) ? $statuses[ $key ] : $data['label'];
+            $key             = 'wc-' . $slug;
+            $ordered[ $key ] = $statuses[ $key ] ?? $data['label'];
         }
         foreach ( $statuses as $key => $label ) {
             if ( ! isset( $ordered[ $key ] ) ) {
@@ -238,74 +212,85 @@ class CashFlow_Statuses {
     }
 
     // ════════════════════════════════════════════════════════════════════
-    // ADMIN UI — BADGE COLOURS
-    // ════════════════════════════════════════════════════════════════════
-
-    public function enqueue_dashicons() {
-        $screen = get_current_screen();
-        if ( $screen && in_array( $screen->id, [ 'edit-shop_order', 'woocommerce_page_wc-orders' ], true ) ) {
-            wp_enqueue_style( 'dashicons' );
-        }
-    }
-
-    public function badge_colours() {
-        $screen = get_current_screen();
-        if ( ! $screen || ! in_array( $screen->id, [ 'edit-shop_order', 'woocommerce_page_wc-orders' ], true ) ) return;
-
-        $css = '
-mark.order-status,span.order-status{
-    display:inline-flex !important;
-    align-items:center !important;
-    gap:4px !important;
-}
-mark.order-status::before,span.order-status::before{
-    font-family:Dashicons !important;
-    speak:never;
-    font-style:normal !important;
-    font-weight:400 !important;
-    font-variant:normal !important;
-    text-transform:none !important;
-    line-height:1 !important;
-    -webkit-font-smoothing:antialiased;
-    -moz-osx-font-smoothing:grayscale;
-    font-size:12px !important;
-    width:12px;
-    height:12px;
-    display:inline-flex !important;
-    align-items:center;
-    justify-content:center;
-    flex-shrink:0;
-}
-';
-        foreach ( self::STATUSES as $slug => $data ) {
-            $bg   = sanitize_hex_color( $data['color_bg'] );
-            $text = sanitize_hex_color( $data['color_text'] );
-            $icon = $data['icon'] ?? 'dashicons-marker';
-            $hex  = self::ICON_MAP[ $icon ] ?? self::ICON_MAP['dashicons-marker'];
-            if ( ! $bg || ! $text ) continue;
-
-            $s    = esc_attr( $slug );
-            $css .= sprintf(
-                'mark.order-status.status-%1$s,span.order-status.status-%1$s,.order-status.status-%1$s{background-color:%2$s !important;color:%3$s !important;}' . "\n",
-                $s, $bg, $text
-            );
-            $css .= sprintf(
-                'mark.order-status.status-%1$s::before,span.order-status.status-%1$s::before{content:"\\%2$s";color:%3$s !important;}' . "\n",
-                $s, $hex, $text
-            );
-        }
-
-        echo '<style id="cf-badge-colours">' . $css . '</style>'; // phpcs:ignore WordPress.Security.EscapeOutput
-    }
-
-    // ════════════════════════════════════════════════════════════════════
-    // FLOW ENFORCEMENT — ACTION BUTTONS (orders list row)
+    // ADMIN CSS — badges + action buttons in one pass
     // ════════════════════════════════════════════════════════════════════
 
     /**
-     * Replace the default WC action buttons with flow-aware next-step buttons.
-     * Each button is coloured and icon-matched to the target status.
+     * Outputs all badge and action button CSS in a single <style> block.
+     * Runs on admin_head so styles are present before the browser renders,
+     * preventing the flash of WC default styles.
+     *
+     * Glyphs are stored on each status in STATUSES['glyph'] — single source
+     * of truth, shared by both badge and button rules.
      */
+    public function admin_css() {
+        global $pagenow;
+        $is_orders = ( $pagenow === 'edit.php'  && isset( $_GET['post_type'] ) && $_GET['post_type'] === 'shop_order' )
+                  || ( $pagenow === 'admin.php' && isset( $_GET['page'] )     && $_GET['page']      === 'wc-orders'   );
+        if ( ! $is_orders ) return;
+
+        // ── Badge base styles ──────────────────────────────────────────
+        $css = '
+.widefat .column-order_status .order-status,
+.woocommerce_page_wc-orders .order-status {
+    position: relative !important;
+    padding: 0 !important;
+    text-indent: -9999px !important;
+    background: transparent !important;
+    border: 0 !important;
+    font-size: 2em !important;
+    line-height: 1 !important;
+    vertical-align: text-top !important;
+    display: inline-block !important;
+}
+.widefat .column-order_status .order-status::after,
+.woocommerce_page_wc-orders .order-status::after {
+    font-family: "WooCommerce" !important;
+    speak: none !important;
+    font-weight: normal !important;
+    font-variant: normal !important;
+    text-transform: none !important;
+    -webkit-font-smoothing: antialiased !important;
+    margin: 0 !important;
+    text-indent: 0 !important;
+    position: absolute !important;
+    top: 0 !important;
+    left: 0 !important;
+    text-align: center !important;
+    width: 100% !important;
+}
+';
+        // ── Per-status rules (badge + action button in one loop) ───────
+        foreach ( self::STATUSES as $slug => $data ) {
+            $bg    = sanitize_hex_color( $data['color_bg'] );
+            $text  = sanitize_hex_color( $data['color_text'] );
+            $glyph = $data['glyph'];
+            $s     = esc_attr( $slug );
+
+            if ( ! $bg || ! $text ) continue;
+
+            // Badge colour + glyph
+            $css .= sprintf(
+                '.order-status.status-%1$s { color:%2$s !important; background-color:transparent !important; border:0 !important; }' . "\n" .
+                '.order-status.status-%1$s::after { content:"\\%3$s" !important; color:%2$s !important; }' . "\n",
+                $s, $text, $glyph
+            );
+
+            // Action button colour + glyph (font-family needed for custom statuses WC doesn't know)
+            $css .= sprintf(
+                '.wc-action-button-%1$s { background-color:%2$s !important; color:%3$s !important; border-color:%3$s !important; }' . "\n" .
+                '.wc-action-button-%1$s::after { font-family:"WooCommerce" !important; content:"\\%4$s" !important; color:%3$s !important; font-weight:normal !important; speak:none !important; -webkit-font-smoothing:antialiased !important; }' . "\n",
+                $s, $bg, $text, $glyph
+            );
+        }
+
+        echo '<style id="cf-admin-css">' . $css . '</style>'; // phpcs:ignore WordPress.Security.EscapeOutput
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // ACTION BUTTONS
+    // ════════════════════════════════════════════════════════════════════
+
     public function action_buttons( $actions, $order ) {
         $current = $order->get_status();
         if ( ! isset( self::STATUSES[ $current ] ) ) return $actions;
@@ -317,9 +302,7 @@ mark.order-status::before,span.order-status::before{
         $new_actions  = [];
 
         foreach ( $allowed as $next ) {
-            $label = isset( $all_statuses[ 'wc-' . $next ] )
-                ? $all_statuses[ 'wc-' . $next ]
-                : ucfirst( str_replace( '-', ' ', $next ) );
+            $label = $all_statuses[ 'wc-' . $next ] ?? ucfirst( str_replace( '-', ' ', $next ) );
 
             $new_actions[ $next ] = [
                 'url'    => wp_nonce_url(
@@ -327,73 +310,11 @@ mark.order-status::before,span.order-status::before{
                     'woocommerce-mark-order-status'
                 ),
                 'name'   => $label,
-                'action' => 'cf-next-' . $next,
+                'action' => $next,
             ];
         }
 
         return $new_actions;
-    }
-
-    /**
-     * CSS for the action buttons: size, Dashicon glyph, per-status colour.
-     * Hooked to admin_footer so it always overrides other plugin styles.
-     */
-    public function action_button_css() {
-        $screen = get_current_screen();
-        if ( ! $screen || ! in_array( $screen->id, [ 'edit-shop_order', 'woocommerce_page_wc-orders' ], true ) ) return;
-
-        $css = '
-.widefat .column-wc_actions a.button[class*="cf-next-"] {
-    width: 28px !important;
-    height: 28px !important;
-    border-radius: 3px;
-    border-width: 1px;
-    border-style: solid;
-    margin: 1px;
-    padding: 0;
-    color: transparent !important;
-    position: relative;
-    overflow: visible;
-}
-.widefat .column-wc_actions a.button[class*="cf-next-"]::after {
-    font-family: Dashicons !important;
-    speak: never;
-    font-style: normal;
-    font-weight: 400 !important;
-    font-variant: normal;
-    text-transform: none;
-    line-height: 1;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-    font-size: 16px !important;
-    margin: 0;
-    text-indent: 0;
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    display: flex !important;
-    align-items: center;
-    justify-content: center;
-}
-';
-        foreach ( self::STATUSES as $slug => $data ) {
-            $bg   = sanitize_hex_color( $data['color_bg'] );
-            $text = sanitize_hex_color( $data['color_text'] );
-            $icon = $data['icon'] ?? 'dashicons-marker';
-            $hex  = self::ICON_MAP[ $icon ] ?? self::ICON_MAP['dashicons-marker'];
-            if ( ! $bg || ! $text ) continue;
-
-            $s    = esc_attr( $slug );
-            $css .= sprintf(
-                '.widefat .column-wc_actions a.button.cf-next-%1$s { background: %2$s !important; color: %3$s !important; border-color: %3$s !important; }' . "\n" .
-                '.widefat .column-wc_actions a.button.cf-next-%1$s::after { content: "\\%4$s"; color: %3$s !important; }' . "\n",
-                $s, $bg, $text, $hex
-            );
-        }
-
-        echo '<style id="cf-action-btn-css">' . $css . '</style>'; // phpcs:ignore WordPress.Security.EscapeOutput
     }
 
     // ════════════════════════════════════════════════════════════════════
@@ -456,26 +377,19 @@ mark.order-status::before,span.order-status::before{
     /**
      * Normalize any status string to a clean slug.
      *
-     * Handles all variants CashFlow or WooCommerce might send:
-     *   'wc-booked', 'booked', 'on_hold', 'wc-on-hold' → 'booked', 'on-hold'
+     * 'wc-booked', 'booked', 'on_hold', 'wc-on-hold' → 'booked', 'on-hold'
      *
-     * Use this everywhere: $order->update_status(), get_status() comparisons,
-     * and anything sent to or received from the CashFlow API.
-     *
-     * @param  string $status  Any status string.
-     * @return string          Clean slug, e.g. 'booked', 'on-hold'.
+     * Use everywhere: $order->update_status(), comparisons, CashFlow API payloads.
      */
     public static function normalize( $status ) {
         $s = strtolower( trim( $status ) );
-        $s = preg_replace( '/^wc-/', '', $s ); // strip wc- prefix if present
-        $s = str_replace( '_', '-', $s );      // on_hold → on-hold
+        $s = preg_replace( '/^wc-/', '', $s );
+        $s = str_replace( '_', '-', $s );
         return $s;
     }
 
     /**
      * Return the full status registry for the CashFlow frontend to consume.
-     *
-     * @return array[]
      */
     public static function get_all_statuses() {
         $result = [];
@@ -487,7 +401,7 @@ mark.order-status::before,span.order-status::before{
                 'type'       => $data['type'],
                 'color_bg'   => $data['color_bg'],
                 'color_text' => $data['color_text'],
-                'icon'       => $data['icon'],
+                'glyph'      => $data['glyph'],
                 'paid'       => $data['paid'],
                 'next'       => $data['next'],
             ];
@@ -496,20 +410,16 @@ mark.order-status::before,span.order-status::before{
     }
 
     /**
-     * Return only the custom (non-core) statuses, keyed by slug.
-     *
-     * @return array[]
+     * Return only custom (non-core) statuses, keyed by slug.
      */
     public static function get_custom_statuses() {
         return array_filter( self::STATUSES, fn( $d ) => 'custom' === $d['type'] );
     }
 
     /**
-     * Return the allowed next-status transitions.
+     * Return allowed next-status transitions.
      *
-     * @param  string|null $slug  Pass a slug to get transitions for one status,
-     *                            or null to get the full map.
-     * @return string[]|array[]
+     * @param  string|null $slug  Specific slug, or null for the full map.
      */
     public static function get_transitions( $slug = null ) {
         if ( $slug !== null ) {

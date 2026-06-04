@@ -109,14 +109,6 @@ class CashFlow_Auth {
         } else {
             delete_option( 'cashflow_order_prefix' );
         }
-
-        // Order prefix save karo — new orders pe WC mein bhi same number dikhega
-        if ( ! empty( $handshake['data']['order_prefix'] ) ) {
-            update_option( 'cashflow_order_prefix', sanitize_text_field( $handshake['data']['order_prefix'] ) );
-        } else {
-            delete_option( 'cashflow_order_prefix' );
-        }
-
         // Step 6: Register webhooks
         $webhook_result = ( new CashFlow_Webhooks() )->register_all_webhooks( $token, $store_id );
 

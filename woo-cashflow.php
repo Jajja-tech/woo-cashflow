@@ -16,7 +16,7 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Constants ──────────────────────────────────────────────────────
-define( 'CASHFLOW_VERSION',    '3.0.0' );
+define( 'CASHFLOW_VERSION',    '3.0.1' );
 define( 'CASHFLOW_PLUGIN_FILE', __FILE__ );
 define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );

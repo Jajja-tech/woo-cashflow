@@ -31,78 +31,87 @@ class CashFlow_Statuses {
     const STATUSES = [
         'pending' => [
             'label'      => 'Pending payment',
+            'description'=> 'Order is awaiting payment. Do not change the status until payment is received.',
             'type'       => 'core',
-            'color_bg'   => '#e5e5e5',
-            'color_text' => '#777777',
-            'glyph'      => 'e011',
+            'color_bg'   => '#f8dda7',
+            'color_text' => '#94660c',
+            'glyph'      => 'e604',
             'paid'       => false,
             'next'       => [ 'processing', 'on-hold', 'cancelled' ],
         ],
         'on-hold' => [
             'label'      => 'On hold',
+            'description'=> 'Order is on hold. Awaiting confirmation or manual review.',
             'type'       => 'core',
             'color_bg'   => '#f8dda7',
             'color_text' => '#94660c',
-            'glyph'      => 'e015',
+            'glyph'      => 'e033',
             'paid'       => false,
             'next'       => [ 'processing', 'cancelled' ],
         ],
         'processing' => [
             'label'      => 'Processing',
+            'description'=> 'Order confirmed, stock reduced, order is being processed.',
             'type'       => 'core',
-            'color_bg'   => '#c6e1c6',
-            'color_text' => '#5b841b',
+            'color_bg'   => '#dd9933',
+            'color_text' => '#ffffff',
             'glyph'      => 'e011',
-            'paid'       => true,
+            'paid'       => false,
             'next'       => [ 'booked', 'cancelled' ],
         ],
         'booked' => [
             'label'      => 'Booked',
+            'description'=> 'Order booked with courier, awaiting dispatch.',
             'type'       => 'custom',
-            'color_bg'   => '#c8d8f0',
-            'color_text' => '#1a4a8a',
-            'glyph'      => 'e01a',
+            'color_bg'   => '#2d66b1',
+            'color_text' => '#ffffff',
+            'glyph'      => 'e006',
             'paid'       => true,
             'next'       => [ 'shipped', 'cancelled' ],
         ],
         'shipped' => [
             'label'      => 'Shipped',
+            'description'=> 'Order dispatched and on its way to the customer.',
             'type'       => 'custom',
-            'color_bg'   => '#fde8c8',
-            'color_text' => '#8a4a00',
+            'color_bg'   => '#2d66b1',
+            'color_text' => '#ffffff',
             'glyph'      => 'e01a',
             'paid'       => true,
             'next'       => [ 'completed', 'failed', 'returned' ],
         ],
         'failed' => [
             'label'      => 'Failed',
+            'description'=> 'Order failed to be delivered. Awaiting menual reattempt.',
             'type'       => 'core',
             'color_bg'   => '#eba3a3',
             'color_text' => '#761919',
-            'glyph'      => 'e014',
+            'glyph'      => 'e016',
             'paid'       => false,
             'next'       => [ 'shipped', 'returned' ],
         ],
         'returned' => [
             'label'      => 'Returned',
+            'description'=> 'Order returned by customer. Awaiting manual review and refund decision.',
             'type'       => 'custom',
-            'color_bg'   => '#e8d0f0',
-            'color_text' => '#5a1a8a',
-            'glyph'      => 'e011',
+            'color_bg'   => '#eba3a3',
+            'color_text' => '#761919',
+            'glyph'      => 'e014',
             'paid'       => true,
             'next'       => [ 'pending', 'refunded' ],
         ],
         'completed' => [
             'label'      => 'Completed',
+            'description'=> 'Order completed successfully. No further action required.',
             'type'       => 'core',
-            'color_bg'   => '#c8d7e1',
-            'color_text' => '#2e4453',
-            'glyph'      => 'e013',
+            'color_bg'   => '#81d742',
+            'color_text' => '#ffffff',
+            'glyph'      => 'e015',
             'paid'       => true,
             'next'       => [ 'refunded' ],
         ],
         'refunded' => [
             'label'      => 'Refunded',
+            'description'=> 'Order refunded to the customer.',
             'type'       => 'core',
             'color_bg'   => '#e5e5e5',
             'color_text' => '#777777',
@@ -112,19 +121,21 @@ class CashFlow_Statuses {
         ],
         'cancelled' => [
             'label'      => 'Cancelled',
+            'description'=> 'Order cancelled by customer or admin.',
             'type'       => 'core',
             'color_bg'   => '#eba3a3',
             'color_text' => '#761919',
-            'glyph'      => 'e014',
+            'glyph'      => 'e013',
             'paid'       => false,
             'next'       => [],
         ],
         'checkout-draft' => [
             'label'      => 'Draft',
+            'description'=> 'Order is a draft and not yet submitted.',
             'type'       => 'core',
             'color_bg'   => '#e5e5e5',
             'color_text' => '#777777',
-            'glyph'      => 'e011',
+            'glyph'      => 'e603',
             'paid'       => false,
             'next'       => [ 'pending' ],
         ],
@@ -175,6 +186,7 @@ class CashFlow_Statuses {
                     $data['label'] . ' <span class="count">(%s)</span>',
                     $data['label'] . ' <span class="count">(%s)</span>'
                 ),
+                'description'               => $data['description'] ?? $data['label'],
             ] );
         }
     }
@@ -269,11 +281,11 @@ class CashFlow_Statuses {
 
             if ( ! $bg || ! $text ) continue;
 
-            // Badge colour + glyph
+            // Badge colour + glyph — use $bg as icon color (background is transparent, icon matches the status colour)
             $css .= sprintf(
                 '.order-status.status-%1$s { color:%2$s !important; background-color:transparent !important; border:0 !important; }' . "\n" .
                 '.order-status.status-%1$s::after { content:"\\%3$s" !important; color:%2$s !important; }' . "\n",
-                $s, $text, $glyph
+                $s, $bg, $glyph
             );
 
             // Action button colour + glyph (font-family needed for custom statuses WC doesn't know)
@@ -285,6 +297,21 @@ class CashFlow_Statuses {
         }
 
         echo '<style id="cf-admin-css">' . $css . '</style>'; // phpcs:ignore WordPress.Security.EscapeOutput
+
+        // Tooltips: WC only adds data-tip for order note count, not status description.
+        // Confirmed from WC source — no PHP hook exists. JS on DOMContentLoaded is the only way.
+        $tips = [];
+        foreach ( self::STATUSES as $slug => $data ) {
+            if ( ! empty( $data['description'] ) ) {
+                $tips[ 'status-' . $slug ] = $data['description'];
+            }
+        }
+        if ( ! empty( $tips ) ) {
+            echo '<script id="cf-status-tips">document.addEventListener("DOMContentLoaded",function(){';
+            echo 'var t=' . wp_json_encode( $tips ) . ';';
+            echo 'Object.keys(t).forEach(function(c){document.querySelectorAll(".order-status."+c).forEach(function(e){e.setAttribute("data-tip",t[c]);e.classList.add("tips");});});';
+            echo '});</script>'; // phpcs:ignore WordPress.Security.EscapeOutput
+        }
     }
 
     // ════════════════════════════════════════════════════════════════════

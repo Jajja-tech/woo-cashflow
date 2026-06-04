@@ -186,62 +186,61 @@ class CashFlow_Sync {
         ], 200 );
     }
 
-    // ── Update courier meta ─────────────────────────────────────────
-    public function update_courier_meta( $request ) {
-        $order_id       = (int) $request->get_param( 'order_id' );
-        $order_number   = $request->get_param( 'order_number' );
-        $courier_name   = sanitize_text_field( $request->get_param( 'courier_name' )   ?? '' );
-        $tracking_no    = sanitize_text_field( $request->get_param( 'tracking_number' ) ?? '' );
-        $courier_status = sanitize_text_field( $request->get_param( 'status' )          ?? '' );
+// ── Update courier meta ─────────────────────────────────────────
+public function update_courier_meta( $request ) {
+    $order_id       = (int) $request->get_param( 'order_id' );
+    $order_number   = $request->get_param( 'order_number' );
+    $courier_name   = sanitize_text_field( $request->get_param( 'courier_name' )    ?? '' );
+    $tracking_no    = sanitize_text_field( $request->get_param( 'tracking_number' ) ?? '' );
+    $courier_status = sanitize_text_field( $request->get_param( 'status' )          ?? '' );
 
-        // Find order by ID or number
-        $order = null;
-        if ( $order_id ) {
-            $order = wc_get_order( $order_id );
-        }
-        if ( ! $order && $order_number ) {
-            $orders = wc_get_orders( [
-                'meta_key'   => '_order_number',
-                'meta_value' => $order_number,
-                'limit'      => 1,
-            ] );
-            if ( ! empty( $orders ) ) $order = $orders[0];
-            // Fallback: try by post ID
-            if ( ! $order ) $order = wc_get_order( (int) $order_number );
-        }
-
-        if ( ! $order ) {
-            return new WP_Error( 'not_found', 'Order not found', [ 'status' => 404 ] );
-        }
-
-        // ── Update proper meta fields (NOT customer note) ──────────
-        // These are real order meta — visible in WC admin Custom Fields
-        if ( $courier_name   ) update_post_meta( $order->get_id(), '_cashflow_courier_name',    $courier_name   );
-        if ( $tracking_no    ) update_post_meta( $order->get_id(), '_cashflow_tracking_number', $tracking_no    );
-        if ( $courier_status ) update_post_meta( $order->get_id(), '_cashflow_courier_status',  $courier_status );
-
-        // ── Also add order note (internal only — no email) ─────────
-        $note_msg = sprintf(
-            '🚚 CashFlow Update — Courier: %s | Tracking: %s | Status: %s',
-            $courier_name ?: 'N/A',
-            $tracking_no  ?: 'N/A',
-            $courier_status ?: 'N/A'
-        );
-        $order->add_order_note( $note_msg, false ); // false = not customer note
-
-        CashFlow_Plugin::log( 'courier_meta_updated', 'order', $order->get_id(), 'success', "Tracking: $tracking_no" );
-
-        return new WP_REST_Response( [
-            'success'  => true,
-            'order_id' => $order->get_id(),
-            'meta'     => [
-                'courier_name'    => $courier_name,
-                'tracking_number' => $tracking_no,
-                'courier_status'  => $courier_status,
-            ],
-        ], 200 );
+    // Find order by ID or number
+    $order = null;
+    if ( $order_id ) {
+        $order = wc_get_order( $order_id );
+    }
+    if ( ! $order && $order_number ) {
+        $orders = wc_get_orders( [
+            'meta_key'   => '_order_number',
+            'meta_value' => $order_number,
+            'limit'      => 1,
+        ] );
+        if ( ! empty( $orders ) ) $order = $orders[0];
+        if ( ! $order ) $order = wc_get_order( (int) $order_number );
     }
 
+    if ( ! $order ) {
+        return new WP_Error( 'not_found', 'Order not found', [ 'status' => 404 ] );
+    }
+
+    // ── HPOS-compatible meta update ────────────────────────────────
+    if ( $courier_name   ) $order->update_meta_data( '_cashflow_courier_name',    $courier_name   );
+    if ( $tracking_no    ) $order->update_meta_data( '_cashflow_tracking_number', $tracking_no    );
+    if ( $courier_status ) $order->update_meta_data( '_cashflow_courier_status',  $courier_status );
+
+    $order->save();
+
+    // ── Internal order note ────────────────────────────────────────
+    $note_msg = sprintf(
+        'CashFlow Update — Courier: %s | Tracking: %s | Status: %s',
+        $courier_name   ?: 'N/A',
+        $tracking_no    ?: 'N/A',
+        $courier_status ?: 'N/A'
+    );
+    $order->add_order_note( $note_msg, false );
+
+    CashFlow_Plugin::log( 'courier_meta_updated', 'order', $order->get_id(), 'success', "Tracking: $tracking_no" );
+
+    return new WP_REST_Response( [
+        'success'  => true,
+        'order_id' => $order->get_id(),
+        'meta'     => [
+            'courier_name'    => $courier_name,
+            'tracking_number' => $tracking_no,
+            'courier_status'  => $courier_status,
+        ],
+    ], 200 );
+}
     // ── Bulk sync orders to CashFlow ────────────────────────────────
     public function sync_orders_to_cashflow( $request ) {
         $limit  = min( (int) ( $request->get_param( 'limit' ) ?? 100 ), 500 );

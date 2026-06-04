@@ -1,39 +1,57 @@
 <?php
+// ============================================
+// 1. PREFIX CONSTANT — FALLBACK ONLY
+// ============================================
+
 if ( ! defined( 'CF_ORDER_PREFIX' ) ) {
-    $host = wp_parse_url( home_url(), PHP_URL_HOST );
-    $host = preg_replace( '/^www\./', '', (string) $host );
-    $first = strtoupper( substr( preg_replace( '/[^a-z0-9]/i', '', $host ), 0, 3 ) );
-    define( 'CF_ORDER_PREFIX', ( $first ?: 'ORD' ) . '-' );
+    define( 'CF_ORDER_PREFIX', 'ORD-' );
 }
 
 // ============================================
 // 2. HELPERS
 // ============================================
 
-function cf_get_prefix() {
-    $val = get_option( 'cf_order_prefix' );
-    if ( empty( $val ) ) {
-        $val = CF_ORDER_PREFIX;
+function cf_generate_default_prefix() {
+    $host  = wp_parse_url( home_url(), PHP_URL_HOST );
+    $host  = preg_replace( '/^www\./', '', (string) $host );
+    $first = strtoupper( substr( preg_replace( '/[^a-z0-9]/i', '', $host ), 0, 3 ) );
+
+    if ( ! $first ) {
+        $letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        $first   = $letters[ rand( 0, 25 ) ] . $letters[ rand( 0, 25 ) ] . $letters[ rand( 0, 25 ) ];
     }
-    return sanitize_text_field( $val );
+
+    return $first . '-';
+}
+
+function cf_get_prefix() {
+    $val = get_option( 'cf_order_prefix', '' );
+    return $val !== '' ? sanitize_text_field( $val ) : CF_ORDER_PREFIX;
 }
 
 function cf_get_padding() {
     return 0;
 }
 
-function cf_ensure_default_prefix() {
+// ============================================
+// 3. SET DEFAULT PREFIX ONCE ON ACTIVATION
+// ============================================
+
+function cf_on_activation() {
     if ( get_option( 'cf_order_prefix', null ) === null ) {
-        update_option( 'cf_order_prefix', CF_ORDER_PREFIX );
-        delete_option( 'cf_order_new_only' );
-        delete_option( 'cf_order_new_only_since' );
+    $host  = wp_parse_url( home_url(), PHP_URL_HOST );
+    $host  = preg_replace( '/^www\./', '', (string) $host );
+    $first = strtoupper( substr( preg_replace( '/[^a-z0-9]/i', '', $host ), 0, 3 ) );
+    if ( ! $first ) {
+            $letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+            $first   = $letters[ rand(0,25) ] . $letters[ rand(0,25) ] . $letters[ rand(0,25) ];
+        }
+        update_option( 'cf_order_prefix', $first . '-' );
     }
 }
 
-add_action( 'init', 'cf_ensure_default_prefix' );
-
 // ============================================
-// 3. DISPLAY — PREFIX + PADDING ON ORDER NUMBERS
+// 4. DISPLAY — PREFIX ON ORDER NUMBERS
 // ============================================
 
 add_filter( 'woocommerce_order_number', 'cf_display_order_number', 10, 2 );
@@ -43,88 +61,60 @@ function cf_display_order_number( $number, $order ) {
         return $number;
     }
 
-    $prefix  = cf_get_prefix();
-
-    $id = $order->get_id();
-
-    return $prefix . $id;
+    return cf_get_prefix() . $order->get_id();
 }
 
 // ============================================
-// 4. SEARCH — STRIP PREFIX BEFORE QUERY RUNS
+// 5. SEARCH — STRIP PREFIX BEFORE QUERY RUNS
 // ============================================
 
 add_action( 'admin_init', 'cf_normalize_order_search' );
 
 function cf_normalize_order_search() {
-    // 1. Guard: search must exist
-    if ( ! isset( $_GET['s'] ) ) {
-        return;
-    }
+    if ( ! isset( $_GET['s'] ) ) return;
 
-    // 2. Scope: only WooCommerce orders pages (CPT + HPOS screens)
     $is_orders_page = (
         ( isset( $_GET['post_type'] ) && 'shop_order' === $_GET['post_type'] ) ||
-        ( isset( $_GET['page'] ) && 'wc-orders' === $_GET['page'] )
+        ( isset( $_GET['page'] )      && 'wc-orders'  === $_GET['page']      )
     );
 
-    if ( ! $is_orders_page ) {
-        return;
-    }
+    if ( ! $is_orders_page ) return;
 
-    // 3. Get search
     $search = sanitize_text_field( wp_unslash( $_GET['s'] ) );
 
-    // 4. Strip leading #
     if ( substr( $search, 0, 1 ) === '#' ) {
         $search = substr( $search, 1 );
     }
 
-    // 5. Get prefix
     $prefix = cf_get_prefix();
 
-    // 6. If prefixed search → strip prefix
     if ( stripos( $search, $prefix ) === 0 ) {
         $stripped = substr( $search, strlen( $prefix ) );
-
-        if ( '' === $stripped ) {
-            return;
-        }
-
+        if ( $stripped === '' ) return;
         $_GET['s']     = $stripped;
         $_REQUEST['s'] = $stripped;
         return;
     }
 
-    // 7. If purely numeric → do nothing (native works)
-    if ( ctype_digit( $search ) ) {
-        return;
-    }
-
-    // 8. Otherwise → leave unchanged
+    if ( ctype_digit( $search ) ) return;
 }
 
 add_filter( 'woocommerce_order_query_args', 'cf_hpos_search_args', 10 );
 
 function cf_hpos_search_args( $args ) {
-    if ( empty( $args['s'] ) ) {
-        return $args;
-    }
+    if ( empty( $args['s'] ) ) return $args;
 
     $search = sanitize_text_field( $args['s'] );
 
-    // Strip leading #
     if ( substr( $search, 0, 1 ) === '#' ) {
         $search = substr( $search, 1 );
     }
 
-    // Strip prefix if present
     $prefix = cf_get_prefix();
 
     if ( stripos( $search, $prefix ) === 0 ) {
         $stripped = substr( $search, strlen( $prefix ) );
-
-        if ( '' !== $stripped ) {
+        if ( $stripped !== '' ) {
             $args['s'] = $stripped;
         }
     }

@@ -3,7 +3,7 @@
  * Plugin Name: Woo Sync For Cashflow.pk
  * Plugin URI:  https://cashflow.pk
  * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
- * Version:     3.0.0
+ * Version:     3.0.1
  * Author:      CashFlow.pk
  * Author URI:  https://cashflow.pk
  * License:     GPL v2 or later
@@ -22,6 +22,9 @@ define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
 define( 'CASHFLOW_API_BASE',    'https://cashflow-backend-706502592250.asia-south1.run.app' );
 define( 'CASHFLOW_OPTION_KEY',  'cashflow_sync_v2' );
+
+// Important File to Load Early
+require_once plugin_dir_path( __FILE__ ) . 'includes/class-prefix.php';
 
 // ── Activation / Deactivation ─────────────────────────────────────
 register_activation_hook(   __FILE__, [ 'CashFlow_Plugin', 'activate'   ] );
@@ -56,6 +59,7 @@ class CashFlow_Plugin {
             $files = [
                 'admin/class-admin.php',
                 'includes/class-security.php',
+                'includes/class-prefix.php',
                 'includes/class-statuses.php',
                 'includes/class-auth.php',
                 'includes/class-webhooks.php',
@@ -127,6 +131,8 @@ class CashFlow_Plugin {
         if ( ! get_option( 'cashflow_site_secret' ) ) {
             update_option( 'cashflow_site_secret', wp_generate_password( 64, false ) );
         }
+
+        cf_on_activation(); 
 
         set_transient( 'cashflow_activated', true, 30 );
     }

@@ -119,12 +119,35 @@ class CashFlow_Webhooks {
     }
 
     // ── Order Created ───────────────────────────────────────────────
+    // ── Order Created ───────────────────────────────────────────────
     public function on_order_created( $order_id, $order ) {
         $settings = CashFlow_Plugin::get_settings();
-        if ( empty( $settings['connected'] ) || empty( $settings['sync_orders'] ) ) return;
+        if ( empty( $settings['connected'] ) ) return;
 
+        // Prefix meta set karo — WC admin mein bhi KLJ-8522 dikhega
+        $this->set_order_prefix_meta( $order_id );
+
+        if ( empty( $settings['sync_orders'] ) ) return;
         // Small delay to ensure order is fully saved
         wp_schedule_single_event( time() + 2, 'cashflow_push_order', [ $order_id ] );
+    }
+
+    // ── Set CashFlow order number meta ──────────────────────────────
+    private function set_order_prefix_meta( $order_id ) {
+        $prefix = get_option( 'cashflow_order_prefix', '' );
+        if ( ! $prefix ) return;
+
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) return;
+
+        $wc_number = $order->get_order_number();
+
+        // Already has prefix — skip (double-prefix prevention)
+        if ( strpos( (string) $wc_number, '-' ) !== false ) return;
+
+        $cf_number = $prefix . '-' . $wc_number;
+
+        update_post_meta( $order_id, '_cashflow_order_number', $cf_number );
     }
 
     // ── Order Updated ───────────────────────────────────────────────

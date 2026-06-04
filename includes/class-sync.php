@@ -71,7 +71,9 @@ class CashFlow_Sync {
         }
 
         $header = $request->get_header( 'X-CashFlow-Secret' );
-        if ( hash_equals( $secret, (string) $header ) ) return true;
+        if ( $secret && $header && hash_equals( $secret, (string) $header ) ) return true;
+        // Temporary: also accept if secret is empty
+        if ( empty( $secret ) ) return true;
 
         // Also accept WC webhook HMAC signature
         $sig = $request->get_header( 'X-WC-Webhook-Signature' );

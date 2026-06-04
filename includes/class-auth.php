@@ -94,12 +94,21 @@ class CashFlow_Auth {
         }
 
         // Step 5: Plugin secret + handshake
+        $plugin_secret = wp_generate_password( 64, false );
+        update_option( 'cashflow_plugin_secret', $plugin_secret );
         $handshake = CashFlow_Plugin::api_request( '/stores/' . $store_id . '/plugin-handshake', 'POST', [
             'plugin_secret'  => $plugin_secret,
             'plugin_version' => CASHFLOW_VERSION,
             'wc_version'     => WC()->version,
             'endpoints'      => $this->get_plugin_endpoints(),
         ], $token );
+
+        // Order prefix save karo — new orders pe WC mein bhi same number dikhega
+        if ( ! empty( $handshake['data']['order_prefix'] ) ) {
+            update_option( 'cashflow_order_prefix', sanitize_text_field( $handshake['data']['order_prefix'] ) );
+        } else {
+            delete_option( 'cashflow_order_prefix' );
+        }
 
         // Order prefix save karo — new orders pe WC mein bhi same number dikhega
         if ( ! empty( $handshake['data']['order_prefix'] ) ) {

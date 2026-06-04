@@ -3,7 +3,7 @@
  * Plugin Name: Woo Sync For Cashflow.pk
  * Plugin URI:  https://cashflow.pk
  * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
- * Version:     2.0.0
+ * Version:     2.0.5
  * Author:      CashFlow.pk
  * Author URI:  https://cashflow.pk
  * License:     GPL v2 or later

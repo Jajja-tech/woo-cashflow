@@ -46,9 +46,14 @@ class CashFlow_Admin {
     public function show_notices() {
         if ( get_transient( 'cashflow_activated' ) ) {
             delete_transient( 'cashflow_activated' );
-            $url = admin_url( 'admin.php?page=cashflow-sync' );
+            $settings = CashFlow_Plugin::get_settings();
             echo '<div class="notice notice-success is-dismissible"><p>';
-            printf( '<strong>CashFlow Sync</strong> activated! <a href="%s">Connect your store →</a>', esc_url( $url ) );
+            if ( ! empty( $settings['connected'] ) ) {
+                echo '<strong>CashFlow Sync</strong> activated successfully!';
+            } else {
+                $url = admin_url( 'admin.php?page=cashflow-sync' );
+                printf( '<strong>CashFlow Sync</strong> activated! <a href="%s">Connect your store →</a>', esc_url( $url ) );
+            }
             echo '</p></div>';
         }
 

@@ -166,11 +166,18 @@ class CashFlow_Meta {
 
     public function render_tracking_column( $column, $post_id ) {
         if ( $column !== 'cashflow_tracking' ) return;
-        $tracking = get_post_meta( $post_id, '_cashflow_tracking_number', true );
-        $courier  = get_post_meta( $post_id, '_cashflow_courier_name',    true );
+        $tracking  = get_post_meta( $post_id, '_cashflow_tracking_number', true );
+        $courier   = get_post_meta( $post_id, '_cashflow_courier_name',    true );
+        $cf_number = get_post_meta( $post_id, '_cashflow_order_number',    true );
+
         if ( $tracking ) {
+            if ( $cf_number ) {
+                echo '<small style="color:#7c3aed;font-weight:700;font-family:monospace">' . esc_html( $cf_number ) . '</small><br>';
+            }
             echo '<small style="color:#7c3aed;font-weight:600">' . esc_html( $courier ) . '</small><br>';
             echo '<code style="font-size:11px">' . esc_html( $tracking ) . '</code>';
+        } elseif ( $cf_number ) {
+            echo '<small style="color:#9ca3af;font-family:monospace">' . esc_html( $cf_number ) . '</small>';
         } else {
             echo '<span style="color:#9ca3af">—</span>';
         }

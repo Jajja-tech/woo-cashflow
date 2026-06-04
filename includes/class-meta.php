@@ -163,9 +163,6 @@ class CashFlow_Meta {
         $order->update_meta_data( '_cashflow_tracking_number', $tracking_number );
         $order->update_meta_data( '_cashflow_courier_status',  $courier_status  );
         $order->save();
-        update_post_meta( $order->get_id(), '_cashflow_courier_name',    $courier_name    );
-        update_post_meta( $order->get_id(), '_cashflow_tracking_number', $tracking_number );
-        update_post_meta( $order->get_id(), '_cashflow_courier_status',  $courier_status  );
     }
 
 

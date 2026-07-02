@@ -45,6 +45,14 @@ class CashFlow_Webhooks {
             $consumer_secret = $this->get_wc_consumer_secret();
         }
 
+        // Without the WC consumer_secret, WooCommerce would sign deliveries with an
+        // empty secret and the backend could never verify them. Bail loudly instead
+        // of registering 8 silently-unverifiable webhooks.
+        if ( empty( $consumer_secret ) ) {
+            CashFlow_Plugin::log( 'webhook_register', 'store', 0, 'error', 'Cannot register webhooks: WC consumer secret unavailable — reconnect the store.' );
+            return [ 'registered' => 0, 'total' => count( $this->webhook_topics ), 'error' => 'missing_consumer_secret' ];
+        }
+
         // Backend receive route: store id AFTER the path segment.
         $webhook_url = CASHFLOW_API_BASE . '/stores/webhook-receive/' . $store_id;
 

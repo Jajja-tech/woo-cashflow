@@ -78,7 +78,7 @@ class CashFlow_Admin {
     public function ajax_save_settings() {
         check_ajax_referer( 'cashflow_nonce', 'nonce' );
         $settings = CashFlow_Plugin::get_settings();
-        $fields = [ 'sync_orders', 'sync_inventory', 'sync_customers', 'sync_courier_meta', 'bidirectional' ];
+        $fields = [ 'sync_courier_meta', 'bidirectional' ];
         foreach ( $fields as $f ) {
             $settings[ $f ] = ! empty( $_POST[ $f ] );
         }

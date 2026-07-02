@@ -81,7 +81,6 @@ class CashFlow_REST {
                 'order_status'  => get_site_url() . '/wp-json/cashflow/v1/order-status',
                 'update_stock'  => get_site_url() . '/wp-json/cashflow/v1/update-stock',
                 'courier_meta'  => get_site_url() . '/wp-json/cashflow/v1/courier-meta',
-                'sync_orders'   => get_site_url() . '/wp-json/cashflow/v1/sync-orders',
                 'ping'          => get_site_url() . '/wp-json/cashflow/v1/ping',
             ],
         ], 200 );

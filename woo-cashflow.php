@@ -157,9 +157,6 @@ class CashFlow_Plugin {
             'connected'         => false,
             'connected_at'      => '',
             'store_url'         => '',
-            'sync_orders'       => true,
-            'sync_inventory'    => true,
-            'sync_customers'    => true,
             'sync_courier_meta' => true,
             'bidirectional'     => true,
         ] );

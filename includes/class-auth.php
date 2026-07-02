@@ -238,7 +238,6 @@ class CashFlow_Auth {
             'order_status' => $base . '/order-status',
             'update_stock' => $base . '/update-stock',
             'courier_meta' => $base . '/courier-meta',
-            'sync_orders'  => $base . '/sync-orders',
             'ping'         => $base . '/ping',
             'status'       => $base . '/status',
         ];

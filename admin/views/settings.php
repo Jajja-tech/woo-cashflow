@@ -74,9 +74,6 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
     <div class="cf-card-body">
       <?php
       $toggles = [
-        'sync_orders'       => [ '📦 Orders',      'Sync new/updated orders to CashFlow in real-time'           ],
-        'sync_inventory'    => [ '📊 Inventory',   'Sync stock changes and product updates'                     ],
-        'sync_customers'    => [ '👤 Customers',   'Sync new customers to CashFlow'                             ],
         'sync_courier_meta' => [ '🚚 Courier Meta','Update WC order meta when courier is booked in CashFlow'    ],
         'bidirectional'     => [ '↔️ Bi-directional','Allow CashFlow to update order status back in WooCommerce' ],
       ];
@@ -114,7 +111,6 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
         ['POST', '/order-status', 'Update WC order status from CashFlow'],
         ['POST', '/update-stock', 'Update product stock'],
         ['POST', '/courier-meta', 'Update courier tracking meta on WC order'],
-        ['POST', '/sync-orders',  'Bulk push WC orders to CashFlow'],
         ['GET',  '/ping',         'Health check'],
         ['GET',  '/status',       'Plugin + connection status'],
       ];

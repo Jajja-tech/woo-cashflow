@@ -43,13 +43,6 @@ class CashFlow_Sync {
             'permission_callback' => [ $this, 'verify_cashflow_request' ],
         ] );
 
-        // Bulk order sync: WC → CashFlow
-        register_rest_route( $namespace, '/sync-orders', [
-            'methods'             => 'POST',
-            'callback'            => [ $this, 'sync_orders_to_cashflow' ],
-            'permission_callback' => [ $this, 'verify_cashflow_request' ],
-        ] );
-
         // Health check
         register_rest_route( $namespace, '/ping', [
             'methods'             => 'GET',
@@ -128,13 +121,7 @@ class CashFlow_Sync {
 
         $old_status = $order->get_status();
 
-        // Remove our hook temporarily to prevent loop
-        remove_action( 'woocommerce_order_status_changed', [ new CashFlow_Webhooks(), 'on_order_status_changed' ], 10 );
-
         $order->update_status( $wc_status, $note ?: 'Updated via CashFlow', $notify );
-
-        // Re-add hook
-        add_action( 'woocommerce_order_status_changed', [ new CashFlow_Webhooks(), 'on_order_status_changed' ], 10, 4 );
 
         CashFlow_Plugin::log( 'order_status_updated', 'order', $order_id, 'success', "$old_status → $wc_status via CashFlow" );
 
@@ -167,9 +154,6 @@ class CashFlow_Sync {
             return new WP_Error( 'not_found', 'Product not found', [ 'status' => 404 ] );
         }
 
-        // Remove our hook temporarily to prevent loop
-        remove_action( 'woocommerce_product_set_stock', [ new CashFlow_Webhooks(), 'on_stock_changed' ], 10 );
-
         if ( $stock_qty !== null ) {
             wc_update_product_stock( $product, (int) $stock_qty, 'set' );
         }
@@ -177,8 +161,6 @@ class CashFlow_Sync {
             $product->set_stock_status( $stock_status );
             $product->save();
         }
-
-        add_action( 'woocommerce_product_set_stock', [ new CashFlow_Webhooks(), 'on_stock_changed' ], 10, 1 );
 
         CashFlow_Plugin::log( 'stock_updated', 'product', $product->get_id(), 'success', "Stock: $stock_qty" );
 
@@ -253,33 +235,4 @@ public function update_courier_meta( $request ) {
         ],
     ], 200 );
 }
-    // ── Bulk sync orders to CashFlow ────────────────────────────────
-    public function sync_orders_to_cashflow( $request ) {
-        $limit  = min( (int) ( $request->get_param( 'limit' ) ?? 100 ), 500 );
-        $offset = (int) ( $request->get_param( 'offset' ) ?? 0 );
-        $status = $request->get_param( 'status' ) ?? '';
-
-        $args = [
-            'limit'   => $limit,
-            'offset'  => $offset,
-            'orderby' => 'date',
-            'order'   => 'DESC',
-        ];
-        if ( $status ) $args['status'] = $status;
-
-        $orders  = wc_get_orders( $args );
-        $webhook = new CashFlow_Webhooks();
-        $pushed  = 0;
-
-        foreach ( $orders as $order ) {
-            $webhook->push_order( $order->get_id() );
-            $pushed++;
-        }
-
-        return new WP_REST_Response( [
-            'success' => true,
-            'pushed'  => $pushed,
-            'total'   => count( $orders ),
-        ], 200 );
-    }
 }

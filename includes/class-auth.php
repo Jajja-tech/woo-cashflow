@@ -109,8 +109,9 @@ class CashFlow_Auth {
         } else {
             delete_option( 'cashflow_order_prefix' );
         }
-        // Step 6: Register webhooks
-        $webhook_result = ( new CashFlow_Webhooks() )->register_all_webhooks( $token, $store_id );
+        // Step 6: Register native WC webhooks, signed with the store's WC
+        // consumer_secret (the backend verifies X-WC-Webhook-Signature against it).
+        $webhook_result = ( new CashFlow_Webhooks() )->register_all_webhooks( $token, $store_id, $keys['consumer_secret'] );
 
         // Step 7: Save settings
         CashFlow_Plugin::save_settings( [

@@ -10,7 +10,7 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
   <!-- Header -->
   <div class="cf-header">
     <div class="cf-logo">
-      <span class="cf-logo-mark"><?php echo cf_icon( 'box', 24 ); ?></span>
+      <?php echo cf_logo( 40 ); ?>
       <div>
         <h1>CashFlow Sync <span class="cf-ver">v<?php echo esc_html( CASHFLOW_VERSION ); ?></span></h1>
         <p>Secure bi-directional WooCommerce &#8596; CashFlow sync</p>

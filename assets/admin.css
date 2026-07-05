@@ -2,7 +2,7 @@
    CashFlow Sync — Admin styles (v4)
    Rebuilt to match the CASHFLOW app design system.
    Violet brand · Lucide icons (no emojis) · app cards/buttons/
-   toggles/pills · light-first with a prefers-color-scheme dark block.
+   toggles/pills · plain light only (dark clashed with the WP-admin chrome).
    ============================================================ */
 
 .cashflow-wrap {
@@ -57,12 +57,18 @@
   border-bottom: 1px solid var(--border);
 }
 .cf-logo { display: flex; align-items: center; gap: 13px; }
-.cf-logo-mark {
-  width: 42px; height: 42px; border-radius: 12px; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center;
-  color: #fff; background: linear-gradient(135deg, var(--cf) 0%, #6d28d9 100%);
-  box-shadow: 0 4px 12px rgba(124,58,237,.35);
+
+/* Brand mark — the app's CascadeLoader artwork. Static = logo; .is-loading = loader. */
+.cf-mark { color: var(--cf); }
+.cf-mark .cf-ink { opacity: 1; }
+@keyframes cf-casc {
+  0%   { opacity: .12; transform: scale(.78); }
+  22%  { opacity: 1;   transform: scale(1);   }
+  52%  { opacity: 1;   transform: scale(1);   }
+  80%, 100% { opacity: .12; transform: scale(.78); }
 }
+.cf-mark.is-loading .cf-ink { animation: cf-casc 1.9s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .cf-mark.is-loading .cf-ink { animation: none; opacity: 1; } }
 .cf-logo h1 {
   margin: 0; font-size: 19px; font-weight: 800; letter-spacing: -.02em;
   color: var(--text); line-height: 1.2;
@@ -294,31 +300,5 @@
 @keyframes cfSpin { to { transform: rotate(360deg); } }
 .cf-ic-spin { animation: cfSpin .8s linear infinite; }
 
-/* ── Dark mode — mirror the app's dark theme ──────────────── */
-@media (prefers-color-scheme: dark) {
-  .cashflow-wrap {
-    --cf:        #8b5cf6;
-    --cf-2:      #a78bfa;
-    --cf-soft:   #1a1526;
-    --cf-border: #2f2545;
-    --ok:        #4ade80;
-    --ok-bg:     rgba(34,197,94,.12);
-    --err:       #f87171;
-    --err-bg:    rgba(248,113,113,.10);
-    --text:      #e9edec;
-    --text-2:    #b8bfbd;
-    --muted:     #8a918f;
-    --border:    #241e35;
-    --line:      #1c1828;
-    --surface:   #110f18;
-    --surface-2: #16121f;
-    --page:      #0a080e;
-    --shadow:       0 2px 10px rgba(0,0,0,.5);
-    --shadow-hover: 0 4px 26px rgba(0,0,0,.6);
-  }
-  .cashflow-wrap .cf-logo-mark { box-shadow: 0 4px 16px rgba(139,92,246,.4); }
-  .cashflow-wrap .cf-security-ic { background: #1a1526; }
-  .cashflow-wrap .cf-security-item strong { color: #e9edec; }
-  .cashflow-wrap .cf-security-item p { color: var(--cf-2); }
-  .cashflow-wrap .cf-step-num { background: #33384a; }
-}
+/* Plain light only — no prefers-color-scheme dark block (dark clashed with the
+   WooCommerce/WP-admin chrome). The tokens above are the single source of truth. */

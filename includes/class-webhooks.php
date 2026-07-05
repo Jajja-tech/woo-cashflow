@@ -16,16 +16,16 @@ defined( 'ABSPATH' ) || exit;
  */
 class CashFlow_Webhooks {
 
-    // All webhooks we register (topic => label)
+    // Webhooks we register (topic => label). ORDER topics only: the CashFlow
+    // backend receiver only understands order webhooks — it maps any delivery to
+    // an order and upserts it. Registering product.*/customer.* here made WC
+    // deliver payloads that got mis-saved as phantom Rs.0 orders. Products and
+    // customers are synced via CashFlow's own pull (sync-products / SKU search),
+    // not webhooks, so the order topics are the complete, correct set.
     private $webhook_topics = [
         'order.created'    => 'Order Created',
         'order.updated'    => 'Order Updated',
         'order.deleted'    => 'Order Deleted',
-        'product.created'  => 'Product Created',
-        'product.updated'  => 'Product Updated',
-        'product.deleted'  => 'Product Deleted',
-        'customer.created' => 'Customer Created',
-        'customer.updated' => 'Customer Updated',
     ];
 
     public function __construct() {

@@ -20,23 +20,17 @@
         eye:    svg('<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>', 13),
         eyeOff: svg('<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/>', 13),
     };
-    // Brand loader — the app's CascadeLoader artwork (mirrors cf_logo() in
+    // Brand loader — SVG port of the app's CascadeLoader (mirrors cf_logo() in
     // includes/class-icons.php). One loader language across app + plugin.
     function brandMark(size, loading) {
-        const scale = (size / 250).toFixed(5);
-        const bar = (l, t, w, h, d) =>
-            `<span style="position:absolute;left:${l}px;top:${t}px;width:${w}px;height:${h}px;transform:translate(-50%,-50%) rotate(-45deg)">` +
-            `<span class="cf-ink" style="position:absolute;inset:0;background:var(--cf);border-radius:17px;animation-delay:${d}"></span></span>`;
+        const rect = (cx, cy, w, h, d) =>
+            `<g transform="rotate(-45 ${cx} ${cy})"><rect class="cf-ink" style="animation-delay:${d}" x="${cx - w/2}" y="${cy - h/2}" width="${w}" height="${h}" rx="17"/></g>`;
         const arrow =
-            `<span style="position:absolute;left:31.3px;top:221.6px;width:270px;height:66px;transform:translate(0,-50%) rotate(-45deg);transform-origin:left center">` +
-            `<span class="cf-ink" style="position:absolute;inset:0;background:none;animation-delay:.26s">` +
-            `<span style="position:absolute;left:0;top:16px;width:241px;height:34px;background:var(--cf);border-radius:17px 0 0 17px"></span>` +
-            `<span style="position:absolute;left:226px;top:0;width:44px;height:66px;background:var(--cf);clip-path:polygon(0 0,0 100%,100% 50%)"></span>` +
-            `</span></span>`;
-        return `<span class="cf-mark${loading ? ' is-loading' : ''}" style="width:${size}px;height:${size}px;position:relative;display:inline-block;vertical-align:-3px;flex-shrink:0">` +
-            `<span style="position:absolute;top:0;left:0;width:250px;height:250px;transform:scale(${scale});transform-origin:top left">` +
-            bar(51,55,40,34,'0s') + bar(88,93,143,34,'.13s') + bar(161,165,143,34,'.39s') + bar(197,202,40,34,'.52s') + arrow +
-            `</span></span>`;
+            `<g transform="translate(31.3 221.6) rotate(-45) translate(0 -33)"><g class="cf-ink" style="animation-delay:.26s">` +
+            `<rect x="0" y="16" width="241" height="34" rx="17"/><polygon points="226,0 226,66 270,33"/></g></g>`;
+        return `<svg class="cf-mark${loading ? ' is-loading' : ''}" width="${size}" height="${size}" viewBox="0 0 250 250" fill="var(--cf)" style="vertical-align:-3px" aria-hidden="true">` +
+            rect(51,55,40,34,'0s') + rect(88,93,143,34,'.13s') + arrow + rect(161,165,143,34,'.39s') + rect(197,202,40,34,'.52s') +
+            `</svg>`;
     }
     const spin = brandMark(15, true);
 
@@ -71,6 +65,15 @@
     function esc(s) {
         return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
+
+    // ── Tabs (app ScrollableTabs behaviour) ────────────────────────
+    $('.cf-tab').on('click', function() {
+        const t = $(this).data('tab');
+        $('.cf-tab').removeClass('is-active');
+        $(this).addClass('is-active');
+        $('.cf-panel').removeClass('is-active');
+        $('.cf-panel[data-panel="' + t + '"]').addClass('is-active');
+    });
 
     // ── Token visibility toggle ────────────────────────────────────
     $('#cf-toggle-token').on('click', function() {

@@ -51,16 +51,9 @@
 .cashflow-wrap .cf-ic { display: inline-block; vertical-align: -0.18em; flex-shrink: 0; }
 
 /* ── Header ───────────────────────────────────────────────── */
-.cf-header {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 16px; margin: 0 0 20px; padding-bottom: 16px;
-  border-bottom: 1px solid var(--border);
-}
-.cf-logo { display: flex; align-items: center; gap: 13px; }
-
-/* Brand mark — the app's CascadeLoader artwork. Static = logo; .is-loading = loader. */
-.cf-mark { color: var(--cf); }
-.cf-mark .cf-ink { opacity: 1; }
+/* Brand mark (SVG) — the app's CascadeLoader artwork. Static = logo; .is-loading = loader. */
+.cf-mark { display: inline-block; vertical-align: middle; flex-shrink: 0; }
+.cf-mark .cf-ink { transform-box: fill-box; transform-origin: center; opacity: 1; }
 @keyframes cf-casc {
   0%   { opacity: .12; transform: scale(.78); }
   22%  { opacity: 1;   transform: scale(1);   }
@@ -69,15 +62,51 @@
 }
 .cf-mark.is-loading .cf-ink { animation: cf-casc 1.9s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .cf-mark.is-loading .cf-ink { animation: none; opacity: 1; } }
-.cf-logo h1 {
-  margin: 0; font-size: 19px; font-weight: 800; letter-spacing: -.02em;
-  color: var(--text); line-height: 1.2;
+
+/* ── PageHeader (app style) ───────────────────────────────── */
+.cf-ph {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px; margin: 6px 0 16px;
 }
-.cf-logo h1 .cf-ver {
+.cf-ph-left { display: flex; align-items: center; gap: 11px; }
+.cf-ph-icon {
+  width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(124,58,237,.10); border: 1px solid rgba(124,58,237,.22);
+}
+.cf-ph-titlerow { display: flex; align-items: center; gap: 8px; }
+.cf-ph h1 { margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -.02em; color: var(--text); line-height: 1.2; }
+.cf-ph .cf-ver {
   font-size: 11px; font-weight: 600; color: var(--muted);
-  vertical-align: middle; margin-left: 6px; letter-spacing: 0;
+  background: var(--surface-2); border: 1px solid var(--line);
+  padding: 1px 7px; border-radius: 20px;
 }
-.cf-logo p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.cf-ph p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.cf-ph-right { display: flex; align-items: center; gap: 8px; }
+
+/* ── Tabs (app ScrollableTabs) ────────────────────────────── */
+.cf-tabs {
+  display: flex; align-items: center; gap: 4px; margin: 0 0 18px;
+  border-bottom: 1px solid var(--border); overflow-x: auto;
+  scrollbar-width: none; -ms-overflow-style: none;
+}
+.cf-tabs::-webkit-scrollbar { display: none; }
+.cf-tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 9px 14px; font-family: inherit; font-size: 13px; font-weight: 400;
+  color: var(--muted); background: none; border: none;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  border-radius: 6px 6px 0 0; cursor: pointer; white-space: nowrap;
+  transition: color .15s, border-color .15s;
+}
+.cf-tab:hover { color: var(--text); }
+.cf-tab.is-active { font-weight: 600; color: var(--text); border-bottom-color: var(--cf); }
+.cf-tab .cf-ic { color: currentColor; }
+
+/* ── Tab panels ───────────────────────────────────────────── */
+.cf-panel { display: none; }
+.cf-panel.is-active { display: block; animation: cfFade .18s ease; }
+@keyframes cfFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
 /* ── Status pill ──────────────────────────────────────────── */
 .cf-pill {

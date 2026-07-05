@@ -81,43 +81,37 @@ if ( ! function_exists( 'cf_logo' ) ) {
      * language as the app). Colour inherits from `--cf`, so it renders in brand
      * violet wherever it's placed.
      *
-     * @param int  $size     Rendered width/height in px (artwork authored at 250).
-     * @param bool $animated true → cascade loading animation; false → static logo.
+     * @param int    $size     Rendered width/height in px (artwork authored at 250).
+     * @param bool   $animated true → cascade loading animation; false → static logo.
+     * @param string $fill     Fill colour (default inherits the page's --cf via the
+     *                         SVG root fill). Pass an explicit hex for standalone use
+     *                         (e.g. the base64 WP-admin menu icon, outside .cashflow-wrap).
      */
-    function cf_logo( $size = 40, $animated = false ) {
-        $size  = (int) $size;
-        $scale = $size / 250;
-        // [ left, top, width, height, animation-delay ] — from CascadeLoader.
-        $bars = [
-            [ 51,  55,  40,  34, '0s'   ],   // short top-left
-            [ 88,  93,  143, 34, '.13s' ],   // long upper
-            [ 161, 165, 143, 34, '.39s' ],   // long lower
-            [ 197, 202, 40,  34, '.52s' ],   // short bottom-right
-        ];
-        $ink = 'position:absolute;inset:0;background:var(--cf);transform-origin:center;border-radius:17px';
-
-        $out  = sprintf(
-            '<span class="cf-mark%s" style="width:%dpx;height:%dpx;position:relative;display:inline-block;flex-shrink:0" role="img" aria-label="CashFlow">',
-            $animated ? ' is-loading' : '', $size, $size
-        );
-        $out .= sprintf(
-            '<span style="position:absolute;top:0;left:0;width:250px;height:250px;transform:scale(%s);transform-origin:top left">',
-            rtrim( rtrim( sprintf( '%.5f', $scale ), '0' ), '.' )
-        );
-        foreach ( $bars as [ $l, $t, $w, $h, $d ] ) {
-            $out .= sprintf(
-                '<span style="position:absolute;left:%dpx;top:%dpx;width:%dpx;height:%dpx;transform:translate(-50%%,-50%%) rotate(-45deg)">'
-                . '<span class="cf-ink" style="%s;animation-delay:%s"></span></span>',
-                $l, $t, $w, $h, $ink, $d
+    function cf_logo( $size = 40, $animated = false, $fill = 'var(--cf)' ) {
+        $size = (int) $size;
+        // Positioned rounded rects (exact rotate about each centre) — the same
+        // geometry as the app's CascadeLoader. Each ink element scales+fades on
+        // its own delay when .is-loading. The transform ATTRIBUTE positions the
+        // group; the CSS scale animates the inner .cf-ink (so they don't collide).
+        $rect = function ( $cx, $cy, $w, $h, $delay ) {
+            return sprintf(
+                '<g transform="rotate(-45 %s %s)"><rect class="cf-ink" style="animation-delay:%s" x="%s" y="%s" width="%d" height="%d" rx="17"/></g>',
+                $cx, $cy, $delay, $cx - $w / 2, $cy - $h / 2, $w, $h
             );
-        }
-        // Arrow (shaft + head), grouped — delay .26s.
-        $out .= '<span style="position:absolute;left:31.3px;top:221.6px;width:270px;height:66px;transform:translate(0,-50%) rotate(-45deg);transform-origin:left center">'
-            . '<span class="cf-ink" style="position:absolute;inset:0;background:none;transform-origin:center;animation-delay:.26s">'
-            . '<span style="position:absolute;left:0;top:16px;width:241px;height:34px;background:var(--cf);border-radius:17px 0 0 17px"></span>'
-            . '<span style="position:absolute;left:226px;top:0;width:44px;height:66px;background:var(--cf);clip-path:polygon(0 0,0 100%,100% 50%)"></span>'
-            . '</span></span>';
-        $out .= '</span></span>';
-        return $out;
+        };
+        $shapes  = $rect( 51, 55, 40, 34, '0s' );        // short top-left
+        $shapes .= $rect( 88, 93, 143, 34, '.13s' );      // long upper
+        // arrow (shaft + head) — delay .26s
+        $shapes .= '<g transform="translate(31.3 221.6) rotate(-45) translate(0 -33)">'
+            . '<g class="cf-ink" style="animation-delay:.26s">'
+            . '<rect x="0" y="16" width="241" height="34" rx="17"/><polygon points="226,0 226,66 270,33"/>'
+            . '</g></g>';
+        $shapes .= $rect( 161, 165, 143, 34, '.39s' );    // long lower
+        $shapes .= $rect( 197, 202, 40, 34, '.52s' );     // short bottom-right
+
+        return sprintf(
+            '<svg xmlns="http://www.w3.org/2000/svg" class="cf-mark%s" width="%d" height="%d" viewBox="0 0 250 250" fill="%s" role="img" aria-label="CashFlow">%s</svg>',
+            $animated ? ' is-loading' : '', $size, $size, esc_attr( $fill ), $shapes
+        );
     }
 }

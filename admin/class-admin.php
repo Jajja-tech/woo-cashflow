@@ -23,7 +23,9 @@ class CashFlow_Admin {
             'manage_woocommerce',
             'cashflow-sync',
             [ $this, 'render_page' ],
-            CASHFLOW_PLUGIN_URL . 'assets/logo-icon.png',
+            // Base64 SVG (not a PNG URL) so WP-admin sizes it to 20px like every
+            // other menu icon — a raw PNG rendered oversized. Same CashFlow mark.
+            'data:image/svg+xml;base64,' . base64_encode( cf_logo( 20, false, '#a7aaad' ) ),
             58
         );
     }

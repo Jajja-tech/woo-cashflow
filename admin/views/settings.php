@@ -10,19 +10,17 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
   <!-- Header -->
   <div class="cf-header">
     <div class="cf-logo">
-      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M12 2L2 7l10 5 10-5-10-5z" stroke="#7c3aed" stroke-width="2" stroke-linejoin="round"/>
-        <path d="M2 17l10 5 10-5" stroke="#7c3aed" stroke-width="2" stroke-linejoin="round"/>
-        <path d="M2 12l10 5 10-5" stroke="#8b5cf6" stroke-width="2" stroke-linejoin="round"/>
-      </svg>
+      <span class="cf-logo-mark"><?php echo cf_icon( 'box', 24 ); ?></span>
       <div>
-        <h1>CashFlow Sync <span style="font-size:11px;font-weight:400;color:#9ca3af;vertical-align:middle">v<?php echo CASHFLOW_VERSION; ?></span></h1>
-        <p>Secure bi-directional WooCommerce ↔ CashFlow sync</p>
+        <h1>CashFlow Sync <span class="cf-ver">v<?php echo esc_html( CASHFLOW_VERSION ); ?></span></h1>
+        <p>Secure bi-directional WooCommerce &#8596; CashFlow sync</p>
       </div>
     </div>
-    <span class="cf-badge <?php echo $connected ? 'cf-badge-connected' : 'cf-badge-disconnected'; ?>">
-      <?php echo $connected ? '🟢 Connected' : '🔴 Not Connected'; ?>
-    </span>
+    <?php if ( $connected ) : ?>
+      <span class="cf-pill cf-pill-ok"><span class="cf-dot"></span> Connected</span>
+    <?php else : ?>
+      <span class="cf-pill cf-pill-off"><span class="cf-dot"></span> Not connected</span>
+    <?php endif; ?>
   </div>
 
   <?php if ( $connected ) : ?>
@@ -31,7 +29,7 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
   <!-- Store Info -->
   <div class="cf-card">
     <div class="cf-card-header">
-      <h2>🔗 Connected Store</h2>
+      <h2><?php echo cf_icon( 'plug', 16 ); ?> Connected Store</h2>
     </div>
     <div class="cf-card-body">
       <div class="cf-info-grid">
@@ -57,9 +55,9 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
         </div>
       </div>
       <div class="cf-actions">
-        <button class="cf-btn cf-btn-secondary" id="cf-verify-btn">🔍 Verify Connection</button>
-        <button class="cf-btn cf-btn-secondary" id="cf-reregister-btn">🔄 Re-register Webhooks</button>
-        <button class="cf-btn cf-btn-danger"    id="cf-disconnect-btn">Disconnect</button>
+        <button class="cf-btn cf-btn-secondary" id="cf-verify-btn"><?php echo cf_icon( 'search', 15 ); ?> Verify Connection</button>
+        <button class="cf-btn cf-btn-secondary" id="cf-reregister-btn"><?php echo cf_icon( 'refresh-cw', 15 ); ?> Re-register Webhooks</button>
+        <button class="cf-btn cf-btn-danger"    id="cf-disconnect-btn"><?php echo cf_icon( 'power', 15 ); ?> Disconnect</button>
       </div>
       <div id="cf-connect-msg" class="cf-msg" style="display:none"></div>
     </div>
@@ -68,32 +66,35 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
   <!-- Sync Settings -->
   <div class="cf-card">
     <div class="cf-card-header">
-      <h2>⚙️ Sync Settings</h2>
+      <h2><?php echo cf_icon( 'settings', 16 ); ?> Sync Settings</h2>
       <p>Control what gets synced between WooCommerce and CashFlow</p>
     </div>
     <div class="cf-card-body">
       <?php
       $toggles = [
-        'sync_courier_meta' => [ '🚚 Courier Meta','Update WC order meta when courier is booked in CashFlow'    ],
-        'bidirectional'     => [ '↔️ Bi-directional','Allow CashFlow to update order status back in WooCommerce' ],
+        'sync_courier_meta' => [ 'truck',            'Courier Meta',    'Update WC order meta when courier is booked in CashFlow'    ],
+        'bidirectional'     => [ 'arrow-left-right', 'Bi-directional', 'Allow CashFlow to update order status back in WooCommerce' ],
       ];
-      foreach ( $toggles as $key => [ $label, $desc ] ) :
+      foreach ( $toggles as $key => [ $icon, $label, $desc ] ) :
         $checked = ! empty( $settings[$key] );
       ?>
       <label class="cf-toggle">
-        <div class="cf-toggle-info">
-          <strong><?php echo esc_html( $label ); ?></strong>
-          <span><?php echo esc_html( $desc ); ?></span>
-        </div>
-        <div class="cf-switch">
-          <input type="checkbox" name="<?php echo esc_attr($key); ?>" <?php checked($checked); ?>>
+        <span class="cf-toggle-info">
+          <?php echo cf_icon( $icon, 17 ); ?>
+          <span>
+            <strong><?php echo esc_html( $label ); ?></strong>
+            <span><?php echo esc_html( $desc ); ?></span>
+          </span>
+        </span>
+        <span class="cf-switch">
+          <input type="checkbox" name="<?php echo esc_attr( $key ); ?>" <?php checked( $checked ); ?>>
           <span class="cf-switch-slider"></span>
-        </div>
+        </span>
       </label>
       <?php endforeach; ?>
-      <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
-        <button class="cf-btn cf-btn-primary" id="cf-save-settings-btn">Save Settings</button>
-        <span id="cf-settings-msg" style="display:none"></span>
+      <div class="cf-save-row">
+        <button class="cf-btn cf-btn-primary" id="cf-save-settings-btn"><?php echo cf_icon( 'check', 15 ); ?> Save Settings</button>
+        <span id="cf-settings-msg" class="cf-save-note"></span>
       </div>
     </div>
   </div>
@@ -101,7 +102,7 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
   <!-- REST Endpoints -->
   <div class="cf-card">
     <div class="cf-card-header">
-      <h2>🔗 REST Endpoints</h2>
+      <h2><?php echo cf_icon( 'link-2', 16 ); ?> REST Endpoints</h2>
       <p>CashFlow backend calls these to update your WooCommerce store</p>
     </div>
     <div class="cf-card-body">
@@ -117,7 +118,7 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
       foreach ( $eps as [$m, $p, $d] ) :
       ?>
       <div class="cf-ep">
-        <span class="cf-ep-method cf-ep-<?php echo strtolower($m); ?>"><?php echo $m; ?></span>
+        <span class="cf-ep-method cf-ep-<?php echo strtolower( $m ); ?>"><?php echo esc_html( $m ); ?></span>
         <code><?php echo esc_html( $base . $p ); ?></code>
         <span class="cf-ep-desc"><?php echo esc_html( $d ); ?></span>
       </div>
@@ -128,10 +129,10 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
   <!-- Sync Log -->
   <div class="cf-card">
     <div class="cf-card-header">
-      <h2>📋 Recent Sync Events</h2>
+      <h2><?php echo cf_icon( 'scroll-text', 16 ); ?> Recent Sync Events</h2>
     </div>
     <div class="cf-card-body">
-      <button class="cf-btn cf-btn-ghost" id="cf-load-log-btn">Load Log</button>
+      <button class="cf-btn cf-btn-ghost" id="cf-load-log-btn"><?php echo cf_icon( 'refresh-cw', 15 ); ?> Load Log</button>
       <div id="cf-log-container" style="margin-top:14px"></div>
     </div>
   </div>
@@ -144,28 +145,28 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
     <div class="cf-card-body">
       <div class="cf-security-grid">
         <div class="cf-security-item">
-          <span class="cf-security-icon">🔐</span>
+          <span class="cf-security-ic"><?php echo cf_icon( 'shield-check', 18 ); ?></span>
           <div>
             <strong>Store Ownership Verified</strong>
             <p>Your store URL is detected automatically — no one can steal another store's keys</p>
           </div>
         </div>
         <div class="cf-security-item">
-          <span class="cf-security-icon">⚡</span>
+          <span class="cf-security-ic"><?php echo cf_icon( 'zap', 18 ); ?></span>
           <div>
             <strong>Auto API Key Generation</strong>
             <p>WooCommerce REST API keys are generated automatically — no manual copy-paste</p>
           </div>
         </div>
         <div class="cf-security-item">
-          <span class="cf-security-icon">🔄</span>
+          <span class="cf-security-ic"><?php echo cf_icon( 'arrow-left-right', 18 ); ?></span>
           <div>
             <strong>Bi-directional Sync</strong>
             <p>Orders, inventory, courier status — sync both ways in real-time</p>
           </div>
         </div>
         <div class="cf-security-item">
-          <span class="cf-security-icon">🛡️</span>
+          <span class="cf-security-ic"><?php echo cf_icon( 'key', 18 ); ?></span>
           <div>
             <strong>HMAC Signed Requests</strong>
             <p>Every request between CashFlow and this plugin is cryptographically signed</p>
@@ -178,14 +179,14 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
   <!-- Connect form -->
   <div class="cf-card">
     <div class="cf-card-header">
-      <h2>🔌 Connect to CashFlow</h2>
+      <h2><?php echo cf_icon( 'plug', 16 ); ?> Connect to CashFlow</h2>
       <p>Enter your CashFlow token — everything else is automatic</p>
     </div>
     <div class="cf-card-body">
 
       <!-- Detected site -->
       <div class="cf-detected-site">
-        <span class="cf-detected-label">🌐 Your Store URL (auto-detected)</span>
+        <span class="cf-detected-label"><?php echo cf_icon( 'globe', 13 ); ?> Your Store URL (auto-detected)</span>
         <code><?php echo esc_html( $site_url ); ?></code>
         <span class="cf-detected-note">This URL will be verified with CashFlow — you cannot change it</span>
       </div>
@@ -193,16 +194,14 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
       <div class="cf-form-group">
         <label for="cf-token-input">
           <strong>CashFlow API Token</strong>
-          <a href="https://app.cashflow.pk/settings?tab=api" target="_blank" class="cf-help-link">Where to find it? →</a>
+          <a href="https://app.cashflow.pk/settings?tab=api" target="_blank" rel="noopener" class="cf-help-link">Where to find it? <?php echo cf_icon( 'arrow-up-right', 12 ); ?></a>
         </label>
         <div class="cf-token-wrap">
-          <input type="password" id="cf-token-input" placeholder="Paste your CashFlow token here..." class="cf-input" autocomplete="off">
-          <button type="button" class="cf-toggle-visibility" id="cf-toggle-token">Show</button>
+          <input type="password" id="cf-token-input" placeholder="Paste your CashFlow token here…" class="cf-input" autocomplete="off">
+          <button type="button" class="cf-toggle-visibility" id="cf-toggle-token"><?php echo cf_icon( 'eye', 13 ); ?> <span>Show</span></button>
         </div>
-        <p class="cf-input-hint">Found in CashFlow → Settings → API Tokens</p>
+        <p class="cf-input-hint">Found in CashFlow &#8594; Settings &#8594; API Tokens</p>
       </div>
-
-      <div id="cf-pre-check-result" style="display:none"></div>
 
       <div class="cf-connect-steps">
         <div class="cf-step" id="cf-step-1">
@@ -228,7 +227,7 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
       </div>
 
       <button class="cf-btn cf-btn-primary cf-btn-large" id="cf-connect-btn">
-        ⚡ Connect to CashFlow
+        <?php echo cf_icon( 'zap', 16 ); ?> Connect to CashFlow
       </button>
 
       <div id="cf-connect-msg" class="cf-msg" style="display:none"></div>

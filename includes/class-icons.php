@@ -67,8 +67,57 @@ if ( ! function_exists( 'cf_icon' ) ) {
             'search'          => '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
             'power'           => '<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>',
             'key'             => '<path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/>',
-            'box'             => '<path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/>',
             'arrow-up-right'  => '<path d="M7 7h10v10"/><path d="M7 17 17 7"/>',
         ];
+    }
+}
+
+if ( ! function_exists( 'cf_logo' ) ) {
+
+    /**
+     * The CashFlow brand mark — a byte-for-byte port of the app's CascadeLoader
+     * artwork (cashflow-frontend/src/components/shared/CascadeLoader.jsx). Static
+     * it is the LOGO; with $animated=true it is the LOADER (the same one loader
+     * language as the app). Colour inherits from `--cf`, so it renders in brand
+     * violet wherever it's placed.
+     *
+     * @param int  $size     Rendered width/height in px (artwork authored at 250).
+     * @param bool $animated true → cascade loading animation; false → static logo.
+     */
+    function cf_logo( $size = 40, $animated = false ) {
+        $size  = (int) $size;
+        $scale = $size / 250;
+        // [ left, top, width, height, animation-delay ] — from CascadeLoader.
+        $bars = [
+            [ 51,  55,  40,  34, '0s'   ],   // short top-left
+            [ 88,  93,  143, 34, '.13s' ],   // long upper
+            [ 161, 165, 143, 34, '.39s' ],   // long lower
+            [ 197, 202, 40,  34, '.52s' ],   // short bottom-right
+        ];
+        $ink = 'position:absolute;inset:0;background:var(--cf);transform-origin:center;border-radius:17px';
+
+        $out  = sprintf(
+            '<span class="cf-mark%s" style="width:%dpx;height:%dpx;position:relative;display:inline-block;flex-shrink:0" role="img" aria-label="CashFlow">',
+            $animated ? ' is-loading' : '', $size, $size
+        );
+        $out .= sprintf(
+            '<span style="position:absolute;top:0;left:0;width:250px;height:250px;transform:scale(%s);transform-origin:top left">',
+            rtrim( rtrim( sprintf( '%.5f', $scale ), '0' ), '.' )
+        );
+        foreach ( $bars as [ $l, $t, $w, $h, $d ] ) {
+            $out .= sprintf(
+                '<span style="position:absolute;left:%dpx;top:%dpx;width:%dpx;height:%dpx;transform:translate(-50%%,-50%%) rotate(-45deg)">'
+                . '<span class="cf-ink" style="%s;animation-delay:%s"></span></span>',
+                $l, $t, $w, $h, $ink, $d
+            );
+        }
+        // Arrow (shaft + head), grouped — delay .26s.
+        $out .= '<span style="position:absolute;left:31.3px;top:221.6px;width:270px;height:66px;transform:translate(0,-50%) rotate(-45deg);transform-origin:left center">'
+            . '<span class="cf-ink" style="position:absolute;inset:0;background:none;transform-origin:center;animation-delay:.26s">'
+            . '<span style="position:absolute;left:0;top:16px;width:241px;height:34px;background:var(--cf);border-radius:17px 0 0 17px"></span>'
+            . '<span style="position:absolute;left:226px;top:0;width:44px;height:66px;background:var(--cf);clip-path:polygon(0 0,0 100%,100% 50%)"></span>'
+            . '</span></span>';
+        $out .= '</span></span>';
+        return $out;
     }
 }

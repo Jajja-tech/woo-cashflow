@@ -53,7 +53,6 @@ class CashFlow_Sync {
 
     // ── Verify request is from CashFlow ────────────────────────────
     public function verify_cashflow_request( $request ) {
-        return true; // TEMP: bypass auth
         $settings = CashFlow_Plugin::get_settings();
         if ( empty( $settings['connected'] ) ) return false;
 
@@ -66,8 +65,6 @@ class CashFlow_Sync {
 
         $header = $request->get_header( 'X-CashFlow-Secret' );
         if ( $secret && $header && hash_equals( $secret, (string) $header ) ) return true;
-        // Temporary: also accept if secret is empty
-        if ( empty( $secret ) ) return true;
 
         // Also accept WC webhook HMAC signature
         $sig = $request->get_header( 'X-WC-Webhook-Signature' );

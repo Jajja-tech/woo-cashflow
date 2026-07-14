@@ -3,7 +3,7 @@
  * Plugin Name: Woo Sync For Cashflow.pk
  * Plugin URI:  https://cashflow.pk
  * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
- * Version:     5.1.0
+ * Version:     5.1.1
  * Update URI:  https://github.com/Jajja-tech/woo-cashflow
  * Author:      CashFlow.pk
  * Author URI:  https://cashflow.pk
@@ -17,7 +17,7 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Constants ──────────────────────────────────────────────────────
-define( 'CASHFLOW_VERSION',    '5.1.0' );
+define( 'CASHFLOW_VERSION',    '5.1.1' );
 define( 'CASHFLOW_PLUGIN_FILE', __FILE__ );
 define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
@@ -48,6 +48,38 @@ if ( file_exists( $cf_puc_loader ) ) {
             error_log( '[CashFlow Sync] Update checker init failed: ' . $e->getMessage() );
         }
     }
+}
+
+// ── Red warning banner when a plugin update is pending ─────────────
+// Reads WordPress's own update-plugins transient (populated by the update
+// checker above), so it appears exactly when WP knows a newer version
+// exists and disappears the moment the store updates. Warns admins that
+// some sync features may misbehave until they're on the latest version.
+add_action( 'admin_notices', 'cf_pending_update_notice' );
+function cf_pending_update_notice() {
+    if ( ! current_user_can( 'update_plugins' ) ) {
+        return;
+    }
+    $plugin_file = plugin_basename( CASHFLOW_PLUGIN_FILE );
+    $updates     = get_site_transient( 'update_plugins' );
+    if ( ! is_object( $updates ) || ! isset( $updates->response[ $plugin_file ]->new_version ) ) {
+        return; // no update pending (isset is null-safe — no warnings on empty transient)
+    }
+    $new_version = $updates->response[ $plugin_file ]->new_version;
+    $update_url  = wp_nonce_url(
+        self_admin_url( 'update.php?action=upgrade-plugin&plugin=' . rawurlencode( $plugin_file ) ),
+        'upgrade-plugin_' . $plugin_file
+    );
+    ?>
+    <div class="notice notice-error" style="border-left-color:#b32d2e;">
+        <p style="font-size:14px; margin:0.7em 0;">
+            <span class="dashicons dashicons-warning" style="color:#b32d2e; vertical-align:text-bottom;"></span>
+            <strong style="color:#b32d2e;">CashFlow Sync update available (v<?php echo esc_html( $new_version ); ?>).</strong>
+            Some sync features may stop working correctly until you update to the latest version.
+            <a href="<?php echo esc_url( $update_url ); ?>" class="button button-primary" style="margin-left:8px;">Update now</a>
+        </p>
+    </div>
+    <?php
 }
 
 // ── Activation / Deactivation ─────────────────────────────────────

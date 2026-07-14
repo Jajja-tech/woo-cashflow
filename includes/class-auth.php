@@ -82,36 +82,37 @@ class CashFlow_Auth {
         $keys = $this->generate_wc_api_keys();
         if ( is_wp_error( $keys ) ) wp_send_json_error( [ 'message' => $keys->get_error_message() ] );
 
-        // Step 4: Send keys to CashFlow
-        $update = CashFlow_Plugin::api_request( '/stores/' . $store_id . '/update-credentials', 'POST', [
-            'consumer_key'    => $keys['consumer_key'],
-            'consumer_secret' => $keys['consumer_secret'],
-            'site_url'        => $site_url,
+        // Step 4 (v5): create the platform CHANNEL and mint the per-connection
+        // secret. ONE call replaces the legacy update-credentials + plugin-handshake:
+        // WC creds go into integration_connections (encrypted); nothing to stores.* .
+        $connect = CashFlow_Plugin::api_request( '/integrations/woocommerce/connect-platform', 'POST', [
+            'store_id'    => $store_id,
+            'credentials' => [
+                'store_url'       => $site_url,
+                'consumer_key'    => $keys['consumer_key'],
+                'consumer_secret' => $keys['consumer_secret'],
+            ],
         ], $token );
-        if ( ! $update['ok'] ) {
+        if ( ! $connect['ok'] || empty( $connect['data']['connectionSecret'] ) ) {
             $this->delete_wc_api_key( $keys['key_id'] );
-            wp_send_json_error( [ 'message' => 'Could not send credentials to CashFlow' ] );
+            wp_send_json_error( [ 'message' => $connect['data']['error'] ?? 'Could not connect the store to CashFlow' ] );
         }
+        $connection_secret = $connect['data']['connectionSecret'];
+        update_option( 'cashflow_connection_secret', $connection_secret );
+        delete_option( 'cashflow_plugin_secret' ); // legacy secret retired in v5
 
-        // Step 5: Plugin secret + handshake
-        $plugin_secret = wp_generate_password( 64, false );
-        update_option( 'cashflow_plugin_secret', $plugin_secret );
-        $handshake = CashFlow_Plugin::api_request( '/stores/' . $store_id . '/plugin-handshake', 'POST', [
-            'plugin_secret'  => $plugin_secret,
-            'plugin_version' => CASHFLOW_VERSION,
-            'wc_version'     => WC()->version,
-            'endpoints'      => $this->get_plugin_endpoints(),
-        ], $token );
-
-        // Order prefix save karo — new orders pe WC mein bhi same number dikhega
-        if ( ! empty( $handshake['data']['order_prefix'] ) ) {
-            update_option( 'cashflow_order_prefix', sanitize_text_field( $handshake['data']['order_prefix'] ) );
+        // Step 5 (v5): order prefix is a store SETTING now — read it from /settings.
+        $settings_res = CashFlow_Plugin::api_request( '/settings?scope=store&scope_id=' . $store_id, 'GET', null, $token );
+        $prefix = $settings_res['ok'] ? ( $settings_res['data']['settings']['store.order_prefix'] ?? '' ) : '';
+        if ( ! empty( $prefix ) ) {
+            update_option( 'cashflow_order_prefix', sanitize_text_field( $prefix ) );
         } else {
             delete_option( 'cashflow_order_prefix' );
         }
-        // Step 6: Register native WC webhooks, signed with the store's WC
-        // consumer_secret (the backend verifies X-WC-Webhook-Signature against it).
-        $webhook_result = ( new CashFlow_Webhooks() )->register_all_webhooks( $token, $store_id, $keys['consumer_secret'] );
+
+        // Step 6 (v5): register native WC webhooks signed with the CONNECTION SECRET
+        // (the backend verifies X-WC-Webhook-Signature against it).
+        $webhook_result = ( new CashFlow_Webhooks() )->register_all_webhooks( $token, $store_id, $connection_secret );
 
         // Step 7: Save settings
         CashFlow_Plugin::save_settings( [

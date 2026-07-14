@@ -56,22 +56,17 @@ class CashFlow_Sync {
         $settings = CashFlow_Plugin::get_settings();
         if ( empty( $settings['connected'] ) ) return false;
 
-        // Check plugin secret header
-        $secret   = get_option( 'cashflow_plugin_secret' );
-        if ( ! $secret ) {
-            $secret = wp_generate_password( 40, false );
-            update_option( 'cashflow_plugin_secret', $secret );
-        }
+        // v5: authenticate backend→plugin calls with the per-connection secret.
+        $secret = get_option( 'cashflow_connection_secret', '' );
+        if ( ! $secret ) return false;
 
         $header = $request->get_header( 'X-CashFlow-Secret' );
-        if ( $secret && $header && hash_equals( $secret, (string) $header ) ) return true;
+        if ( $header && hash_equals( $secret, (string) $header ) ) return true;
 
-        // Also accept WC webhook HMAC signature
+        // Also accept an HMAC signature over the body, signed with the same secret.
         $sig = $request->get_header( 'X-WC-Webhook-Signature' );
         if ( $sig ) {
-            $body      = $request->get_body();
-            $wh_secret = get_option( 'cashflow_webhook_secret', '' );
-            $expected  = base64_encode( hash_hmac( 'sha256', $body, $wh_secret, true ) );
+            $expected = base64_encode( hash_hmac( 'sha256', $request->get_body(), $secret, true ) );
             return hash_equals( $expected, $sig );
         }
 

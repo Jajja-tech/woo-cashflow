@@ -40,17 +40,20 @@ class CashFlow_Webhooks {
     // signs every delivery with it (X-WC-Webhook-Signature) and the CashFlow
     // backend verifies against the same secret. When not supplied (e.g. the admin
     // re-register action) we read it back from the WC api-keys table.
-    public function register_all_webhooks( $token, $store_id, $consumer_secret = null ) {
-        if ( empty( $consumer_secret ) ) {
-            $consumer_secret = $this->get_wc_consumer_secret();
+    public function register_all_webhooks( $token, $store_id, $signing_secret = null ) {
+        // v5: webhooks are signed with the per-connection secret (the backend
+        // verifies X-WC-Webhook-Signature against it). Fall back to the stored
+        // connection secret on the admin re-register action.
+        if ( empty( $signing_secret ) ) {
+            $signing_secret = get_option( 'cashflow_connection_secret', '' );
         }
 
-        // Without the WC consumer_secret, WooCommerce would sign deliveries with an
-        // empty secret and the backend could never verify them. Bail loudly instead
-        // of registering 8 silently-unverifiable webhooks.
-        if ( empty( $consumer_secret ) ) {
-            CashFlow_Plugin::log( 'webhook_register', 'store', 0, 'error', 'Cannot register webhooks: WC consumer secret unavailable — reconnect the store.' );
-            return [ 'registered' => 0, 'total' => count( $this->webhook_topics ), 'error' => 'missing_consumer_secret' ];
+        // Without a signing secret, WooCommerce would sign deliveries with an empty
+        // secret and the backend could never verify them. Bail loudly instead of
+        // registering silently-unverifiable webhooks.
+        if ( empty( $signing_secret ) ) {
+            CashFlow_Plugin::log( 'webhook_register', 'store', 0, 'error', 'Cannot register webhooks: connection secret unavailable — reconnect the store.' );
+            return [ 'registered' => 0, 'total' => count( $this->webhook_topics ), 'error' => 'missing_connection_secret' ];
         }
 
         // Backend receive route: store id AFTER the path segment.
@@ -73,7 +76,7 @@ class CashFlow_Webhooks {
             $webhook->set_delivery_url( $webhook_url );
             $webhook->set_status( 'active' );
             $webhook->set_user_id( $user->ID );
-            $webhook->set_secret( $consumer_secret );
+            $webhook->set_secret( $signing_secret );
             $id = $webhook->save();
             if ( $id ) $new_ids[] = $id;
         }

@@ -3,7 +3,8 @@
  * Plugin Name: Woo Sync For Cashflow.pk
  * Plugin URI:  https://cashflow.pk
  * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
- * Version:     5.0.0
+ * Version:     5.1.0
+ * Update URI:  https://github.com/Jajja-tech/woo-cashflow
  * Author:      CashFlow.pk
  * Author URI:  https://cashflow.pk
  * License:     GPL v2 or later
@@ -16,7 +17,7 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Constants ──────────────────────────────────────────────────────
-define( 'CASHFLOW_VERSION',    '5.0.0' );
+define( 'CASHFLOW_VERSION',    '5.1.0' );
 define( 'CASHFLOW_PLUGIN_FILE', __FILE__ );
 define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
@@ -26,6 +27,28 @@ define( 'CASHFLOW_OPTION_KEY',  'cashflow_sync_v2' );
 // Important Files to Load Early (define helpers used by admin views + bootstrap)
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-prefix.php';
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-icons.php';
+
+// ── Auto-update from GitHub (Plugin Update Checker v5.7) ───────────
+// Stores pull new versions straight from the public GitHub repo's `main`
+// branch: bump the Version header above, merge to main, and every site
+// sees the update in WP-admin (auto-checked ~twice daily). No wp.org.
+$cf_puc_loader = plugin_dir_path( __FILE__ ) . 'includes/plugin-update-checker/plugin-update-checker.php';
+if ( file_exists( $cf_puc_loader ) ) {
+    require_once $cf_puc_loader;
+    if ( class_exists( '\\YahnisElsts\\PluginUpdateChecker\\v5\\PucFactory' ) ) {
+        try {
+            $cf_update_checker = \YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
+                'https://github.com/Jajja-tech/woo-cashflow/',
+                __FILE__,          // main plugin file — PUC reads its Version header on the branch
+                'woo-cashflow'     // plugin slug (must match the installed folder name)
+            );
+            // Stable releases live on `main`; PUC compares its Version header to the installed one.
+            $cf_update_checker->setBranch( 'main' );
+        } catch ( Throwable $e ) {
+            error_log( '[CashFlow Sync] Update checker init failed: ' . $e->getMessage() );
+        }
+    }
+}
 
 // ── Activation / Deactivation ─────────────────────────────────────
 register_activation_hook(   __FILE__, [ 'CashFlow_Plugin', 'activate'   ] );

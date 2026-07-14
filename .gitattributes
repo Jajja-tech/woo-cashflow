@@ -1,0 +1,8 @@
+# Keep development-only files OUT of the zip that stores download via auto-update.
+# GitHub's branch/tag source archives (which Plugin Update Checker fetches) honor export-ignore.
+/CLAUDE.md        export-ignore
+/.gitattributes   export-ignore
+/.gitignore       export-ignore
+/.vscode          export-ignore
+/.DS_Store        export-ignore
+/docs             export-ignore

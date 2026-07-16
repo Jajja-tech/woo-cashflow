@@ -140,6 +140,7 @@ class CashFlow_Webhooks {
 
         $cf_number = $prefix . '-' . $wc_number;
 
-        update_post_meta( $order_id, '_cashflow_order_number', $cf_number );
+        $order->update_meta_data( '_cashflow_order_number', $cf_number );
+        $order->save();
     }
 }

@@ -191,19 +191,14 @@ public function update_courier_meta( $request ) {
     }
 
     if ( $courier_name   ) {
-            update_post_meta( $order->get_id(), '_cashflow_courier_name',    $courier_name   );
-            $order->update_meta_data( '_cashflow_courier_name',    $courier_name   );
-        }
-        if ( $tracking_no    ) {
-            update_post_meta( $order->get_id(), '_cashflow_tracking_number', $tracking_no    );
-            $order->update_meta_data( '_cashflow_tracking_number', $tracking_no    );
-        }
-        if ( $courier_status ) {
-            update_post_meta( $order->get_id(), '_cashflow_courier_status',  $courier_status );
-            $order->update_meta_data( '_cashflow_courier_status',  $courier_status );
-        }
-        $order->save();
-
+        $order->update_meta_data( '_cashflow_courier_name',    $courier_name   );
+    }
+    if ( $tracking_no    ) {
+        $order->update_meta_data( '_cashflow_tracking_number', $tracking_no    );
+    }
+    if ( $courier_status ) {
+        $order->update_meta_data( '_cashflow_courier_status',  $courier_status );
+    }
     $order->save();
 
     // ── Internal order note ────────────────────────────────────────

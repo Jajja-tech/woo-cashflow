@@ -3,7 +3,7 @@
  * Plugin Name: Woo Sync For Cashflow.pk
  * Plugin URI:  https://cashflow.pk
  * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
- * Version:     5.1.1
+ * Version:     5.1.2
  * Update URI:  https://github.com/Jajja-tech/woo-cashflow
  * Author:      CashFlow.pk
  * Author URI:  https://cashflow.pk
@@ -17,12 +17,22 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Constants ──────────────────────────────────────────────────────
-define( 'CASHFLOW_VERSION',    '5.1.1' );
+define( 'CASHFLOW_VERSION',    '5.1.2' );
 define( 'CASHFLOW_PLUGIN_FILE', __FILE__ );
 define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
 define( 'CASHFLOW_API_BASE',    'https://cashflow-backend-706502592250.asia-south1.run.app' );
 define( 'CASHFLOW_OPTION_KEY',  'cashflow_sync_v2' );
+
+// ── HPOS (custom order tables) compatibility ───────────────────────
+// Without this declaration WC marks the plugin incompatible on HPOS
+// stores (the default since WC 8.2), and admins are blocked from
+// enabling HPOS while the plugin is active.
+add_action( 'before_woocommerce_init', function () {
+    if ( class_exists( \Automattic\WooCommerce\Utilities\FeaturesUtil::class ) ) {
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
+    }
+} );
 
 // Important Files to Load Early (define helpers used by admin views + bootstrap)
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-prefix.php';

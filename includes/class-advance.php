@@ -116,8 +116,18 @@ class CashFlow_Advance {
 	 * resolved by the backend FROM the secret and are never sent from here.
 	 *
 	 * The secret is read server-side and never localized to the browser.
+	 *
+	 * @param string|null $read_subject When set, this call is a READ and a failure
+	 *                                  is described as a failure to LOAD that
+	 *                                  subject. Writes leave it null. The two need
+	 *                                  different words: every branch of a write's
+	 *                                  error ends in "Nothing was recorded", which
+	 *                                  on a read tells the user a payment may have
+	 *                                  failed to save when none was ever being
+	 *                                  saved — a small lie whose obvious next move
+	 *                                  is to record it "again".
 	 */
-	private static function api( $endpoint, $method = 'GET', $body = null ) {
+	private static function api( $endpoint, $method = 'GET', $body = null, $read_subject = null ) {
 		$secret = get_option( 'cashflow_connection_secret', '' );
 		if ( empty( $secret ) ) {
 			return [
@@ -131,7 +141,9 @@ class CashFlow_Advance {
 		$res = CashFlow_Plugin::api_request( $endpoint, $method, $body, $secret );
 
 		if ( empty( $res['ok'] ) ) {
-			$res['error'] = self::error_message( $res );
+			$res['error'] = ( null === $read_subject )
+				? self::error_message( $res )
+				: self::read_error_message( $res, $read_subject );
 		}
 		return $res;
 	}
@@ -168,6 +180,42 @@ class CashFlow_Advance {
 	}
 
 	/**
+	 * Turn a failed READ into something a shop manager can act on.
+	 *
+	 * Deliberately not error_message(): that one speaks for a write, and none of
+	 * its reassurances ("Nothing was recorded", "check whether it was recorded
+	 * before trying again") are true — or safe — when all the user did was open a
+	 * panel.
+	 *
+	 * Status is checked BEFORE the backend's own `error` string, which is the
+	 * opposite of the write path. The backend answers a missing order with a bare
+	 * "Order not found"; here that is not an error at all but the ordinary state
+	 * of an order WooCommerce has not synced yet — including a brand-new order
+	 * being drafted on screen — and it deserves an explanation rather than an
+	 * alarm.
+	 */
+	private static function read_error_message( $res, $subject ) {
+		$status = isset( $res['status'] ) ? (int) $res['status'] : 0;
+
+		if ( 0 === $status ) {
+			return 'CashFlow could not be reached, so ' . $subject . ' could not be loaded.';
+		}
+		if ( 401 === $status ) {
+			return 'CashFlow rejected this store’s connection, so ' . $subject . ' could not be loaded. Reconnect under CashFlow → Settings.';
+		}
+		if ( 403 === $status ) {
+			return 'CashFlow refused to show ' . $subject . ' for this store.';
+		}
+		if ( 404 === $status ) {
+			return 'CashFlow has no record of this order yet — it appears there once the order syncs, and advance payments can be recorded from here after that.';
+		}
+		if ( ! empty( $res['data']['error'] ) ) {
+			return 'CashFlow could not load ' . $subject . ': ' . (string) $res['data']['error'];
+		}
+		return 'CashFlow could not load ' . $subject . ' (HTTP ' . $status . ').';
+	}
+
+	/**
 	 * The finance accounts the advance can land in — fetched live from CashFlow.
 	 *
 	 * id + name ONLY. The API never sends a balance and none is ever stored or
@@ -184,7 +232,7 @@ class CashFlow_Advance {
 			return [ 'accounts' => $cached, 'error' => null ];
 		}
 
-		$res = self::api( '/plugin/finance/accounts' );
+		$res = self::api( '/plugin/finance/accounts', 'GET', null, 'the finance accounts' );
 
 		if ( ! empty( $res['ok'] ) && ! empty( $res['data']['accounts'] ) && is_array( $res['data']['accounts'] ) ) {
 			$accounts = [];
@@ -245,12 +293,17 @@ class CashFlow_Advance {
 	 * look the same on screen.
 	 */
 	private static function payments( $order ) {
-		$res = self::api( '/plugin/orders/' . rawurlencode( $order->get_id() ) . '/advance-payments' );
+		$res = self::api(
+			'/plugin/orders/' . rawurlencode( $order->get_id() ) . '/advance-payments',
+			'GET',
+			null,
+			'this order’s advance payments'
+		);
 
 		if ( empty( $res['ok'] ) ) {
 			return [
 				'payments' => [],
-				'error'    => ! empty( $res['error'] ) ? $res['error'] : 'Could not load the advance payments from CashFlow.',
+				'error'    => ! empty( $res['error'] ) ? $res['error'] : 'Could not load this order’s advance payments from CashFlow.',
 			];
 		}
 

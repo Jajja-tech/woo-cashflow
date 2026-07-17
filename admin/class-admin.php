@@ -68,6 +68,9 @@ class CashFlow_Admin {
 
     public function ajax_reregister_webhooks() {
         check_ajax_referer( 'cashflow_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_send_json_error( [ 'message' => 'Permission denied' ] );
+        }
         $result = ( new CashFlow_Webhooks() )->reregister_webhooks();
         if ( $result ) {
             wp_send_json_success( [ 'message' => 'Webhooks registered: ' . $result['registered'] . '/' . $result['total'] ] );
@@ -78,6 +81,9 @@ class CashFlow_Admin {
 
     public function ajax_save_settings() {
         check_ajax_referer( 'cashflow_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_send_json_error( [ 'message' => 'Permission denied' ] );
+        }
         $settings = CashFlow_Plugin::get_settings();
         $fields = [ 'sync_courier_meta', 'bidirectional' ];
         foreach ( $fields as $f ) {
@@ -89,6 +95,9 @@ class CashFlow_Admin {
 
     public function ajax_get_sync_log() {
         check_ajax_referer( 'cashflow_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_send_json_error( [ 'message' => 'Permission denied' ] );
+        }
         global $wpdb;
         $logs = $wpdb->get_results(
             "SELECT * FROM {$wpdb->prefix}cashflow_sync_log ORDER BY created_at DESC LIMIT 50"

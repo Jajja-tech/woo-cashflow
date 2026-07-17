@@ -1,13 +1,16 @@
 /**
  * CashFlow — advance payments panel (order edit screen).
  *
- * Every write goes PHP → CashFlow. This file never sees the connection secret
- * and never decides anything about money: it posts the form, and re-renders
- * whatever the server hands back (rows/totals are rendered in PHP so the markup
- * has exactly one definition).
+ * Every read and every write goes PHP → CashFlow. This file never sees the
+ * connection secret and never decides anything about money: it posts the form,
+ * and re-renders whatever the server hands back. The rows it draws were read
+ * live from CashFlow and rendered in PHP, so the markup has exactly one
+ * definition and this file keeps no list of its own to fall back on.
  *
- * A failure is shown in the panel and nothing on the page is updated —
- * no silent fallback.
+ * A failure is shown in the panel and nothing on the page is updated — no silent
+ * fallback. If a write lands but CashFlow cannot be read back, the server says
+ * `stale` and the panel LOCKS rather than let anyone act on rows it can no
+ * longer vouch for.
  */
 ( function ( $ ) {
 	'use strict';
@@ -29,8 +32,21 @@
 		$( '#cf-adv-overlay' ).toggleClass( 'cf-adv-busy', !! on );
 	}
 
+	/**
+	 * The write landed but CashFlow could not be read back, so the rows and totals
+	 * on screen are no longer known to be current. Take the controls away until
+	 * the order is reloaded: same rule as a panel that could not be read at all —
+	 * no baseline, no controls. Without this the form is still sitting there
+	 * inviting the user to re-enter a payment that IS already recorded.
+	 *
+	 * Deliberately one-way. Only a reload re-establishes a baseline.
+	 */
+	function lock() {
+		$( '#cf-adv-overlay' ).addClass( 'cf-adv-locked' );
+	}
+
 	function resetForm() {
-		$( '#cf-adv-entry-id' ).val( '' );
+		$( '#cf-adv-payment-id' ).val( '' );
 		$( '#cf-adv-amount' ).val( '' );
 		$( '#cf-adv-account' ).val( '' );
 		$( '#cf-adv-txn' ).val( '' );
@@ -39,16 +55,16 @@
 		$( '#cf-adv-cancel' ).hide();
 	}
 
-	// Re-render from the server's payload. Only the keys it sent are touched.
+	// Re-render from the server's payload. Only the keys it sent are touched —
+	// which is load-bearing when the write landed but the read-back did not: the
+	// server then sends a message and NO rows/totals, and the screen keeps what it
+	// had rather than being redrawn from a guess.
 	function apply( data ) {
 		if ( ! data ) {
 			return;
 		}
 		if ( typeof data.rows === 'string' ) {
 			$( '#cf-adv-rows' ).html( data.rows );
-		}
-		if ( typeof data.notice === 'string' ) {
-			$( '#cf-adv-notice' ).html( data.notice );
 		}
 		if ( typeof data.advance === 'string' ) {
 			$( '.cf-adv-total-advance' ).html( data.advance );
@@ -71,9 +87,16 @@
 		)
 			.done( function ( res ) {
 				if ( res && res.success ) {
+					var stale = !! ( res.data && res.data.stale );
 					apply( res.data );
 					resetForm();
-					say( ( res.data && res.data.message ) || 'Saved.', false );
+					// `stale` = the write landed but CashFlow could not be re-read, so
+					// what is on screen is no longer known to be current. That is not a
+					// success tone, and it is not a state to keep editing from.
+					if ( stale ) {
+						lock();
+					}
+					say( ( res.data && res.data.message ) || 'Saved.', stale );
 					return;
 				}
 				// success:false — the server rejected it and changed nothing.
@@ -123,9 +146,12 @@
 		} );
 
 		// ── Edit: load the row into the form ──
+		// data-id is CashFlow's own payment id — the rows were rendered from
+		// CashFlow's list, so it is the id the API expects, with no local
+		// translation step in between.
 		$( document ).on( 'click', '.cf-adv-edit', function () {
 			var $btn = $( this );
-			$( '#cf-adv-entry-id' ).val( $btn.data( 'id' ) );
+			$( '#cf-adv-payment-id' ).val( $btn.data( 'id' ) );
 			$( '#cf-adv-amount' ).val( $btn.data( 'amount' ) );
 			$( '#cf-adv-account' ).val( String( $btn.data( 'account' ) || '' ) );
 			$( '#cf-adv-txn' ).val( $btn.data( 'txn' ) || '' );
@@ -142,7 +168,7 @@
 
 		// ── Save (add or edit) ──
 		$( document ).on( 'click', '#cf-adv-save', function () {
-			var entryId = $( '#cf-adv-entry-id' ).val();
+			var paymentId = $( '#cf-adv-payment-id' ).val();
 			var payload = {
 				amount: $( '#cf-adv-amount' ).val(),
 				account_id: $( '#cf-adv-account' ).val(),
@@ -158,8 +184,8 @@
 				return;
 			}
 
-			if ( entryId ) {
-				payload.entry_id = entryId;
+			if ( paymentId ) {
+				payload.payment_id = paymentId;
 				post( 'cashflow_advance_edit', payload );
 			} else {
 				post( 'cashflow_advance_add', payload );
@@ -171,7 +197,7 @@
 			if ( ! window.confirm( 'Delete this payment? It is removed from CashFlow too, and the COD to collect goes back up.' ) ) {
 				return;
 			}
-			post( 'cashflow_advance_delete', { entry_id: $( this ).data( 'id' ) } );
+			post( 'cashflow_advance_delete', { payment_id: $( this ).data( 'id' ) } );
 		} );
 	} );
 } )( jQuery );

@@ -4,23 +4,32 @@ defined( 'ABSPATH' ) || exit;
 /**
  * CashFlow_Advance — multi-payment advances on the WooCommerce order screens.
  *
- * ── ARCHITECTURE: CashFlow is the single WRITER ──────────────────────────
+ * ── ARCHITECTURE: CashFlow is the single WRITER *and* the single READER ──
  * Every add / edit / delete calls the CashFlow plugin API SYNCHRONOUSLY, from
- * PHP, with the v5 per-connection secret. Only after CashFlow confirms does the
- * order meta change. There is no "write meta and wait for a sync" path, so
- * conflict rules, tombstones and sync races cannot exist here by construction.
+ * PHP, with the v5 per-connection secret. Only after CashFlow confirms does
+ * anything here change. There is no "write meta and wait for a sync" path, so
+ * conflict rules, tombstones and sync races cannot exist by construction.
  *
- * Order meta is a DISPLAY MIRROR — never truth for a write:
- *   cashflow_advance_payments  the entries recorded through WooCommerce (ours)
- *   cashflow_advance_amount    CashFlow's advance total   (CashFlow also pushes this)
- *   cashflow_cod_amount        total − advance            (CashFlow also pushes this)
- *   cashflow_payment_status    unpaid|partial|paid        (CashFlow also pushes this)
- * When CashFlow pushes those three it OVERWRITES ours — which is correct:
- * CashFlow wins conflicts (design D-1).
+ * The PANEL reads its rows LIVE from CashFlow every time it renders
+ * (GET /plugin/orders/{id}/advance-payments) and keeps no list of its own.
+ * Nothing here reconciles anything, because there is only ever one list.
  *
- * A failed API call FAILS LOUDLY and writes nothing (Golden Rule #6). Money
- * recorded in WordPress that CashFlow never learned about is strictly worse
- * than a save that errors.
+ * Order meta holds a DISPLAY CACHE — never truth, never read back to compute a
+ * write:
+ *   cashflow_advance_amount    CashFlow's advance total   (CashFlow pushes this too)
+ *   cashflow_cod_amount        total − advance            (CashFlow pushes this too)
+ *   cashflow_payment_status    unpaid|partial|paid        (CashFlow pushes this too)
+ * It exists for the two surfaces that CANNOT call the API per render: the orders
+ * LIST (one HTTP call per row is not an option) and the totals rows, which draw
+ * before the panel does. When CashFlow pushes these it OVERWRITES ours — which
+ * is correct: CashFlow wins (design D-1).
+ *
+ * A failed API call FAILS LOUDLY and changes nothing (Golden Rule #6). Money
+ * recorded in WordPress that CashFlow never learned about is strictly worse than
+ * a save that errors. A failed READ takes the controls down with it: with no
+ * list there is no baseline, and a stale one would invite a shop manager to
+ * "delete" a payment that is not there, or re-enter one that already is —
+ * recording the same money twice.
  *
  * ── HPOS ────────────────────────────────────────────────────────────────
  * WC CRUD only: wc_get_order() / get_meta() / update_meta_data() / save().
@@ -32,7 +41,6 @@ defined( 'ABSPATH' ) || exit;
  */
 class CashFlow_Advance {
 
-	const META_ENTRIES = 'cashflow_advance_payments';
 	const META_ADVANCE = 'cashflow_advance_amount';
 	const META_COD     = 'cashflow_cod_amount';
 	const META_STATUS  = 'cashflow_payment_status';
@@ -204,29 +212,91 @@ class CashFlow_Advance {
 		];
 	}
 
-	private static function account_name( $account_id ) {
-		$list = self::accounts();
-		foreach ( $list['accounts'] as $a ) {
-			if ( $a['id'] === (string) $account_id ) {
-				return $a['name'];
+	/**
+	 * id → name for a whole list of rows, from an accounts list the caller has
+	 * ALREADY fetched — one lookup per render, not one per row, and never a second
+	 * accounts() call (which on the uncached path is a second HTTP round-trip).
+	 *
+	 * A missing id is not an error: the account may be one this connection can no
+	 * longer see. The row then shows a dash — never a guessed name.
+	 */
+	private static function account_names( $accounts ) {
+		$map = [];
+		foreach ( $accounts as $a ) {
+			$map[ $a['id'] ] = $a['name'];
+		}
+		return $map;
+	}
+
+	/**
+	 * 🔴 THE order's advance payments, read LIVE from CashFlow. This is the ONLY
+	 * list — the panel renders it and edits against it, and there is no copy of
+	 * it anywhere in WordPress.
+	 *
+	 * It is deliberately not cached. A cached list is a second version of the
+	 * truth, and the moment it disagrees with CashFlow the panel starts offering
+	 * to delete payments that no longer exist and to re-enter money that is
+	 * already recorded. One HTTP call per panel render buys that away.
+	 *
+	 * Returns [ 'payments' => [ … ], 'error' => string|null ].
+	 * On failure `payments` is EMPTY and `error` is set — and the caller MUST
+	 * render no rows and no controls (Golden Rule #6). An empty list on a failed
+	 * read is not "no payments", it is "we do not know", and the two must never
+	 * look the same on screen.
+	 */
+	private static function payments( $order ) {
+		$res = self::api( '/plugin/orders/' . rawurlencode( $order->get_id() ) . '/advance-payments' );
+
+		if ( empty( $res['ok'] ) ) {
+			return [
+				'payments' => [],
+				'error'    => ! empty( $res['error'] ) ? $res['error'] : 'Could not load the advance payments from CashFlow.',
+			];
+		}
+
+		$rows = ( isset( $res['data']['payments'] ) && is_array( $res['data']['payments'] ) )
+			? $res['data']['payments']
+			: [];
+
+		$out = [];
+		foreach ( $rows as $p ) {
+			if ( empty( $p['id'] ) ) {
+				continue; // Nothing can be edited or deleted without CashFlow's id.
 			}
+			$out[] = [
+				'id'         => (string) $p['id'],
+				'amount'     => isset( $p['amount'] ) ? (float) $p['amount'] : 0.0,
+				'account_id' => (string) ( isset( $p['account_id'] ) ? $p['account_id'] : '' ),
+				'txn'        => (string) ( isset( $p['transaction_id'] ) ? $p['transaction_id'] : '' ),
+				'paid_at'    => (string) ( isset( $p['paid_at'] ) ? $p['paid_at'] : '' ),
+				'source'     => (string) ( isset( $p['source'] ) ? $p['source'] : '' ),
+			];
 		}
-		return '';
+
+		return [ 'payments' => $out, 'error' => null ];
+	}
+
+	/**
+	 * The advance total = the SUM of the rows CashFlow just returned.
+	 *
+	 * This is CashFlow's own derivation restated, not arithmetic of our own:
+	 * orders.advance_amount is a DERIVED SUM of exactly these rows, maintained by
+	 * trg_order_advance_payments_sync. Summing the list we were just handed lands
+	 * on the same number, from the same source, with nothing carried over from a
+	 * previous screen.
+	 */
+	private static function advance_total( $payments ) {
+		$sum = 0.0;
+		foreach ( $payments as $p ) {
+			$sum += (float) $p['amount'];
+		}
+		return round( $sum, 2 );
 	}
 
 
 	// ════════════════════════════════════════════════════════════════
-	// MIRROR  (display only — never truth for a write)
+	// DISPLAY CACHE  (for the surfaces that cannot call the API)
 	// ════════════════════════════════════════════════════════════════
-
-	private static function entries( $order ) {
-		$raw = $order->get_meta( self::META_ENTRIES );
-		if ( empty( $raw ) ) {
-			return [];
-		}
-		$decoded = is_array( $raw ) ? $raw : json_decode( (string) $raw, true );
-		return is_array( $decoded ) ? $decoded : [];
-	}
 
 	private static function advance_amount( $order ) {
 		return (float) $order->get_meta( self::META_ADVANCE );
@@ -247,44 +317,29 @@ class CashFlow_Advance {
 	}
 
 	/**
-	 * Persist the mirror and every derived display field in ONE save.
+	 * Refresh the display cache from CashFlow's truth, in ONE save.
 	 * (The test plugin saved 2–3 times per action: sync_cod_amount saved, then
 	 * sync_payment_status saved again.)
 	 *
-	 * 🔴 $advance is passed IN, never recomputed from $entries. CashFlow derives
-	 * advance_amount from ALL of an order's payment rows; this mirror only holds
-	 * the ones recorded through WooCommerce. An order that already carried an
-	 * advance from the CashFlow app has no entry here, so recomputing from
-	 * $entries would silently drop it and tell this screen to collect the full
-	 * total as COD. Callers therefore apply the DELTA of their own change to
-	 * CashFlow's cached total — the same arithmetic CashFlow's trigger does.
+	 * 🔴 $advance MUST be the sum of a list CashFlow just returned — see
+	 * advance_total(). It is never this cache's own previous value plus or minus
+	 * what we think we changed: that arithmetic silently drifts the moment the
+	 * same order is touched in the CashFlow app, and it drifts on the money that
+	 * decides what the courier collects at the door.
+	 *
+	 * Nothing here is authoritative. CashFlow pushes these same three fields and
+	 * overwrites us, which is correct (design D-1) — this only spares the orders
+	 * list and the totals rows from being wrong until it does.
 	 */
-	private static function write_mirror( $order, $entries, $advance ) {
+	private static function write_display_cache( $order, $advance ) {
 		$advance = max( 0, (float) $advance );
 		$total   = (float) $order->get_total();
 		$cod     = max( 0, $total - $advance );
 
-		$order->update_meta_data( self::META_ENTRIES, wp_json_encode( array_values( $entries ) ) );
 		$order->update_meta_data( self::META_ADVANCE, wc_format_decimal( $advance, 2 ) );
 		$order->update_meta_data( self::META_COD, wc_format_decimal( $cod, 2 ) );
 		$order->update_meta_data( self::META_STATUS, self::derive_status( $advance, $total ) );
 		$order->save();
-	}
-
-	/**
-	 * CashFlow's advance total minus the payments this screen can itemise.
-	 *
-	 * Non-zero means the two disagree — money recorded in the CashFlow app, or
-	 * before this plugin was installed, or a payment changed there since. It is
-	 * surfaced and never silently reconciled: re-entering it here would record
-	 * the same money twice.
-	 */
-	private static function mirror_drift( $order ) {
-		$listed = 0.0;
-		foreach ( self::entries( $order ) as $e ) {
-			$listed += isset( $e['amount'] ) ? (float) $e['amount'] : 0.0;
-		}
-		return round( self::advance_amount( $order ) - $listed, 2 );
 	}
 
 
@@ -314,50 +369,40 @@ class CashFlow_Advance {
 		);
 	}
 
-	private static function render_drift_notice( $order ) {
-		$drift = self::mirror_drift( $order );
-		if ( abs( $drift ) < 0.01 ) {
-			return '';
-		}
-
-		if ( $drift > 0 ) {
-			$msg = sprintf(
-				'CashFlow holds %s in advances that is not listed here — recorded in the CashFlow app, or before this plugin was installed. Do not re-enter it: that would record the same money twice. Open the order in CashFlow to see every payment.',
-				self::money_text( $drift )
-			);
-		} else {
-			$msg = sprintf(
-				'CashFlow holds %s less than the payments listed here — one of them was changed or removed in the CashFlow app. This list is out of date; CashFlow is correct.',
-				self::money_text( abs( $drift ) )
-			);
-		}
-
-		return '<div class="cf-adv-notice cf-adv-notice-warn">' . esc_html( $msg ) . '</div>';
+	/**
+	 * Where a payment was recorded. CashFlow's `source` is the answer, and the
+	 * DB's CHECK allows exactly these two values.
+	 *
+	 * This column replaced a "By" column that named the WordPress user. That name
+	 * came out of the local mirror, and the mirror is gone: CashFlow records who
+	 * took a payment in CashFlow, and a payment taken in the app has no WordPress
+	 * user to name at all. Showing where it came from is something we actually
+	 * know.
+	 */
+	private static function source_label( $source ) {
+		return 'woocommerce' === $source ? 'WooCommerce' : 'CashFlow';
 	}
 
-	private static function render_row( $entry ) {
-		$user = ! empty( $entry['user'] ) ? get_userdata( (int) $entry['user'] ) : false;
-		$who  = ( $user && ! empty( $user->display_name ) ) ? $user->display_name : '—';
-
-		$id      = isset( $entry['id'] ) ? $entry['id'] : '';
-		$amount  = isset( $entry['amount'] ) ? (float) $entry['amount'] : 0;
-		$account = ! empty( $entry['account'] ) ? $entry['account'] : '—';
-		$txn     = ! empty( $entry['txn'] ) ? $entry['txn'] : '—';
+	private static function render_row( $payment, $names ) {
+		$id      = $payment['id'];
+		$amount  = (float) $payment['amount'];
+		$account = isset( $names[ $payment['account_id'] ] ) ? $names[ $payment['account_id'] ] : '—';
+		$txn     = '' !== $payment['txn'] ? $payment['txn'] : '—';
 
 		ob_start();
 		?>
 		<tr data-id="<?php echo esc_attr( $id ); ?>">
-			<td><?php echo esc_html( isset( $entry['date'] ) ? $entry['date'] : '' ); ?></td>
+			<td><?php echo esc_html( self::local_date( $payment['paid_at'] ) ); ?></td>
 			<td><?php echo wp_kses_post( wc_price( $amount ) ); ?></td>
 			<td><?php echo esc_html( $account ); ?></td>
 			<td><?php echo esc_html( $txn ); ?></td>
-			<td><?php echo esc_html( $who ); ?></td>
+			<td><?php echo esc_html( self::source_label( $payment['source'] ) ); ?></td>
 			<td class="cf-adv-row-actions">
 				<button type="button" class="button cf-adv-edit"
 					data-id="<?php echo esc_attr( $id ); ?>"
 					data-amount="<?php echo esc_attr( $amount ); ?>"
-					data-account="<?php echo esc_attr( isset( $entry['account_id'] ) ? $entry['account_id'] : '' ); ?>"
-					data-txn="<?php echo esc_attr( ! empty( $entry['txn'] ) ? $entry['txn'] : '' ); ?>"
+					data-account="<?php echo esc_attr( $payment['account_id'] ); ?>"
+					data-txn="<?php echo esc_attr( $payment['txn'] ); ?>"
 				>Edit</button>
 				<button type="button" class="button cf-adv-delete" data-id="<?php echo esc_attr( $id ); ?>">Delete</button>
 			</td>
@@ -366,33 +411,58 @@ class CashFlow_Advance {
 		return ob_get_clean();
 	}
 
-	private static function render_rows( $order ) {
-		$entries = self::entries( $order );
-		if ( empty( $entries ) ) {
-			return '<tr class="cf-adv-empty"><td colspan="6">No advance payments recorded through WooCommerce.</td></tr>';
+	/**
+	 * $payments is always a list CashFlow returned. "Empty" here therefore means
+	 * CashFlow holds none — it can never mean "we could not ask", because a
+	 * failed read never reaches this far (see payments() and render_panel()).
+	 */
+	private static function render_rows( $payments, $names ) {
+		if ( empty( $payments ) ) {
+			return '<tr class="cf-adv-empty"><td colspan="6">No advance payments on this order.</td></tr>';
 		}
 		$out = '';
-		foreach ( $entries as $entry ) {
-			$out .= self::render_row( $entry );
+		foreach ( $payments as $payment ) {
+			$out .= self::render_row( $payment, $names );
 		}
 		return $out;
 	}
 
 	/**
-	 * Everything the panel re-renders after a write. Built server-side so the
-	 * row markup has exactly one definition (in PHP) instead of a second copy
-	 * in JavaScript that would drift.
+	 * Everything the panel re-renders after a write — rebuilt from a FRESH read
+	 * of CashFlow, never from what we believe we just changed. Built server-side
+	 * so the row markup has exactly one definition (in PHP) instead of a second
+	 * copy in JavaScript that would drift.
 	 */
 	private static function panel_payload( $order, $message = '' ) {
-		$advance = self::advance_amount( $order );
-		$total   = (float) $order->get_total();
+		$read = self::payments( $order );
+
+		if ( null !== $read['error'] ) {
+			// The write itself succeeded — the caller already checked. What failed
+			// is reading back the result, so we do not know what the list looks
+			// like now and will not draw one. Sending no `rows`/`advance`/`cod`/
+			// `badge` keys leaves the screen exactly as it was: apply() only
+			// touches the keys it is given. Stale, and said out loud.
+			//
+			// `stale` also tells the panel to LOCK: what is on screen no longer has
+			// a known baseline behind it, so it must not be edited from. Reloading
+			// is the only way back.
+			return [
+				'message' => trim( $message . ' But the list below could NOT be refreshed from CashFlow (' . $read['error'] . '), so it is now out of date — reload the order before recording anything else. Do not re-enter what you just recorded.' ),
+				'stale'   => true,
+			];
+		}
+
+		$advance  = self::advance_total( $read['payments'] );
+		$total    = (float) $order->get_total();
+		$accounts = self::accounts();
+
+		self::write_display_cache( $order, $advance );
 
 		return [
-			'rows'    => self::render_rows( $order ),
+			'rows'    => self::render_rows( $read['payments'], self::account_names( $accounts['accounts'] ) ),
 			'advance' => wc_price( $advance ),
 			'cod'     => wc_price( max( 0, $total - $advance ) ),
 			'badge'   => self::status_badge( self::derive_status( $advance, $total ) ),
-			'notice'  => self::render_drift_notice( $order ),
 			'message' => $message,
 		];
 	}
@@ -449,14 +519,32 @@ class CashFlow_Advance {
 			return;
 		}
 
-		$accounts = self::accounts();
-		// No form is offered when there is nothing valid to submit — a broken
-		// form that always errors is worse than a plain sentence (Rule #6).
-		$blocker = '';
-		if ( ! empty( $accounts['error'] ) ) {
-			$blocker = $accounts['error'];
-		} elseif ( empty( $accounts['accounts'] ) ) {
-			$blocker = 'CashFlow has no finance accounts for this store yet. Add one in CashFlow → Finance, then reload this order.';
+		// 🔴 The live read is the BASELINE for everything below it. If it failed we
+		// do not know what exists, so the panel shows no rows and offers no
+		// controls at all — not the last thing we saw, and not an empty table that
+		// would read as "no payments". No baseline, no controls (Rule #6).
+		$read       = self::payments( $order );
+		$read_error = $read['error'];
+
+		// Everything below is asked for ONLY once the read is known good. If
+		// CashFlow could not be reached at all, a second doomed call would stall
+		// this order screen for another api_request timeout, to fill in a picker
+		// that is not going to be rendered anyway.
+		$accounts = [ 'accounts' => [], 'error' => null ];
+		$names    = [];
+		$blocker  = '';
+
+		if ( ! $read_error ) {
+			$accounts = self::accounts();
+			$names    = self::account_names( $accounts['accounts'] );
+
+			// No form is offered when there is nothing valid to submit — a broken
+			// form that always errors is worse than a plain sentence (Rule #6).
+			if ( ! empty( $accounts['error'] ) ) {
+				$blocker = $accounts['error'];
+			} elseif ( empty( $accounts['accounts'] ) ) {
+				$blocker = 'CashFlow has no finance accounts for this store yet. Add one in CashFlow → Finance, then reload this order.';
+			}
 		}
 		?>
 		<div id="cf-adv-overlay" class="cf-adv-overlay" style="display:none;">
@@ -468,60 +556,71 @@ class CashFlow_Advance {
 				</div>
 
 				<div class="cf-adv-body">
-					<p class="cf-adv-hint">Recorded straight into CashFlow. The account is the payment method; each entry means money already received.</p>
+					<p class="cf-adv-hint">Read from and recorded straight into CashFlow. The account is the payment method; each entry means money already received.</p>
 
-					<div id="cf-adv-notice"><?php echo wp_kses_post( self::render_drift_notice( $order ) ); ?></div>
+					<?php if ( $read_error ) : ?>
 
-					<!-- Outside the form block on purpose: the row Edit/Delete buttons render
-					     even when the form does not (no accounts / CashFlow unreachable), and
-					     they still need the order id to post and a slot to report a failure
-					     into. Inside the form these would vanish and a delete would fail
-					     silently. No name attribute — see the note on the form fields below. -->
-					<input type="hidden" id="cf-adv-order-id" value="<?php echo esc_attr( $order->get_id() ); ?>">
+						<div class="cf-adv-notice cf-adv-notice-error"><?php echo esc_html( $read_error ); ?></div>
+						<p class="cf-adv-hint">
+							This order&rsquo;s payments could not be read, so none are shown and none can be
+							added, edited or deleted here. Nothing is wrong with the order &mdash; reload it once
+							CashFlow is reachable, or open it in CashFlow.
+						</p>
 
-					<div class="cf-adv-table-wrap">
-						<table class="cf-adv-table">
-							<thead>
-								<tr>
-									<th>Date</th><th>Amount</th><th>Account</th><th>Txn ID</th><th>By</th><th>Actions</th>
-								</tr>
-							</thead>
-							<tbody id="cf-adv-rows"><?php echo wp_kses_post( self::render_rows( $order ) ); ?></tbody>
-						</table>
-					</div>
-
-					<p id="cf-adv-msg" class="cf-adv-msg"></p>
-
-					<?php if ( $blocker ) : ?>
-						<div class="cf-adv-notice cf-adv-notice-error"><?php echo esc_html( $blocker ); ?></div>
 					<?php else : ?>
-						<div class="cf-adv-form">
-							<h4 id="cf-adv-form-title">Add a payment</h4>
 
-							<!-- No name attributes anywhere in this panel: it renders inside the
-							     WooCommerce order form, and named fields would be posted with the
-							     order itself. -->
-							<input type="hidden" id="cf-adv-entry-id" value="">
+						<!-- Outside the form block on purpose: the row Edit/Delete buttons render
+						     even when the form does not (no accounts), and they still need the
+						     order id to post and a slot to report a failure into. Inside the form
+						     these would vanish and a delete would fail silently. No name
+						     attribute — see the note on the form fields below. -->
+						<input type="hidden" id="cf-adv-order-id" value="<?php echo esc_attr( $order->get_id() ); ?>">
 
-							<label for="cf-adv-amount">Amount *</label>
-							<input type="number" id="cf-adv-amount" step="0.01" min="0.01" autocomplete="off">
-
-							<label for="cf-adv-account">Account *</label>
-							<select id="cf-adv-account">
-								<option value="">— Select account —</option>
-								<?php foreach ( $accounts['accounts'] as $a ) : ?>
-									<option value="<?php echo esc_attr( $a['id'] ); ?>"><?php echo esc_html( $a['name'] ); ?></option>
-								<?php endforeach; ?>
-							</select>
-
-							<label for="cf-adv-txn">Transaction ID (optional)</label>
-							<input type="text" id="cf-adv-txn" autocomplete="off">
-
-							<div class="cf-adv-form-actions">
-								<button type="button" class="button button-primary" id="cf-adv-save">Save payment</button>
-								<button type="button" class="button" id="cf-adv-cancel" style="display:none;">Cancel</button>
-							</div>
+						<div class="cf-adv-table-wrap">
+							<table class="cf-adv-table">
+								<thead>
+									<tr>
+										<th>Date</th><th>Amount</th><th>Account</th><th>Txn ID</th><th>Source</th><th>Actions</th>
+									</tr>
+								</thead>
+								<tbody id="cf-adv-rows"><?php echo wp_kses_post( self::render_rows( $read['payments'], $names ) ); ?></tbody>
+							</table>
 						</div>
+
+						<p id="cf-adv-msg" class="cf-adv-msg"></p>
+
+						<?php if ( $blocker ) : ?>
+							<div class="cf-adv-notice cf-adv-notice-error"><?php echo esc_html( $blocker ); ?></div>
+						<?php else : ?>
+							<div class="cf-adv-form">
+								<h4 id="cf-adv-form-title">Add a payment</h4>
+
+								<!-- No name attributes anywhere in this panel: it renders inside the
+								     WooCommerce order form, and named fields would be posted with the
+								     order itself. -->
+								<input type="hidden" id="cf-adv-payment-id" value="">
+
+								<label for="cf-adv-amount">Amount *</label>
+								<input type="number" id="cf-adv-amount" step="0.01" min="0.01" autocomplete="off">
+
+								<label for="cf-adv-account">Account *</label>
+								<select id="cf-adv-account">
+									<option value="">— Select account —</option>
+									<?php foreach ( $accounts['accounts'] as $a ) : ?>
+										<option value="<?php echo esc_attr( $a['id'] ); ?>"><?php echo esc_html( $a['name'] ); ?></option>
+									<?php endforeach; ?>
+								</select>
+
+								<label for="cf-adv-txn">Transaction ID (optional)</label>
+								<input type="text" id="cf-adv-txn" autocomplete="off">
+
+								<div class="cf-adv-form-actions">
+									<button type="button" class="button button-primary" id="cf-adv-save">Save payment</button>
+									<button type="button" class="button" id="cf-adv-cancel" style="display:none;">Cancel</button>
+								</div>
+							</div>
+						<?php endif; ?>
+
 					<?php endif; ?>
 				</div>
 
@@ -737,14 +836,18 @@ class CashFlow_Advance {
 		return isset( $_POST[ $key ] ) ? sanitize_text_field( wp_unslash( $_POST[ $key ] ) ) : '';
 	}
 
-	/** Locate one mirror entry by its local id. Returns [ index, entry ] or null. */
-	private static function find_entry( $entries, $entry_id ) {
-		foreach ( $entries as $i => $entry ) {
-			if ( isset( $entry['id'] ) && (string) $entry['id'] === (string) $entry_id ) {
-				return [ $i, $entry ];
-			}
-		}
-		return null;
+	/**
+	 * The CashFlow payment id an edit/delete names — taken straight from the row,
+	 * which came straight from CashFlow.
+	 *
+	 * It is passed to the API as-is, with no local check that it belongs to this
+	 * order. That check would be theatre: the backend resolves org + store from
+	 * the connection secret and 404s anything outside this store, and within the
+	 * store a shop manager can already edit any order's payments by opening that
+	 * order. The connection secret is the wall — not a lookup we do here.
+	 */
+	private static function posted_payment_id() {
+		return self::posted_text( 'payment_id' );
 	}
 
 	private static function local_date( $iso ) {
@@ -770,11 +873,12 @@ class CashFlow_Advance {
 			wp_send_json_error( [ 'message' => 'Choose the account the money went into.' ], 422 );
 		}
 
-		// This plugin's own entry id, sent as external_id. The backend's
+		// This plugin's own id for the payment, sent as external_id. The backend's
 		// UNIQUE (store_id, external_id) turns a retry of the SAME request into
 		// the same payment instead of a second one, so a timeout cannot
-		// double-record money.
-		$entry_id = 'wc_' . $order->get_id() . '_' . wp_generate_password( 12, false );
+		// double-record money. It is write-only from here: nothing reads it back,
+		// because CashFlow's own payment id comes down with the list.
+		$external_id = 'wc_' . $order->get_id() . '_' . wp_generate_password( 12, false );
 
 		$res = self::api(
 			'/plugin/orders/' . rawurlencode( $order->get_id() ) . '/advance-payments',
@@ -783,7 +887,7 @@ class CashFlow_Advance {
 				'amount'         => $amount,
 				'account_id'     => $account_id,
 				'transaction_id' => '' !== $txn ? $txn : null,
-				'external_id'    => $entry_id,
+				'external_id'    => $external_id,
 			]
 		);
 
@@ -792,23 +896,6 @@ class CashFlow_Advance {
 			CashFlow_Plugin::log( 'advance_add', 'order', $order->get_id(), 'error', $res['error'] );
 			wp_send_json_error( [ 'message' => $res['error'] ], 502 );
 		}
-
-		$payment = isset( $res['data']['payment'] ) && is_array( $res['data']['payment'] ) ? $res['data']['payment'] : [];
-		$saved   = isset( $payment['amount'] ) ? (float) $payment['amount'] : $amount;
-
-		$entries   = self::entries( $order );
-		$entries[] = [
-			'id'         => $entry_id,
-			'cf_id'      => (string) ( isset( $payment['id'] ) ? $payment['id'] : '' ),
-			'amount'     => $saved,
-			'account_id' => (string) ( ! empty( $payment['account_id'] ) ? $payment['account_id'] : $account_id ),
-			'account'    => self::account_name( $account_id ),
-			'txn'        => (string) ( ! empty( $payment['transaction_id'] ) ? $payment['transaction_id'] : $txn ),
-			'date'       => self::local_date( isset( $payment['paid_at'] ) ? $payment['paid_at'] : '' ),
-			'user'       => get_current_user_id(),
-		];
-
-		self::write_mirror( $order, $entries, self::advance_amount( $order ) + $saved );
 
 		CashFlow_Plugin::log( 'advance_add', 'order', $order->get_id(), 'success', 'Advance recorded in CashFlow' );
 
@@ -823,11 +910,14 @@ class CashFlow_Advance {
 	public function ajax_edit() {
 		$order = self::guard_request();
 
-		$entry_id   = self::posted_text( 'entry_id' );
+		$payment_id = self::posted_payment_id();
 		$amount     = self::posted_amount();
 		$account_id = self::posted_text( 'account_id' );
 		$txn        = self::posted_text( 'transaction_id' );
 
+		if ( empty( $payment_id ) ) {
+			wp_send_json_error( [ 'message' => 'That payment is no longer on this order. Reload and try again.' ], 400 );
+		}
 		if ( $amount <= 0 ) {
 			wp_send_json_error( [ 'message' => 'Enter an amount greater than 0. To remove a payment, delete it.' ], 422 );
 		}
@@ -835,19 +925,8 @@ class CashFlow_Advance {
 			wp_send_json_error( [ 'message' => 'Choose the account the money went into.' ], 422 );
 		}
 
-		$entries = self::entries( $order );
-		$found   = self::find_entry( $entries, $entry_id );
-		if ( ! $found ) {
-			wp_send_json_error( [ 'message' => 'That payment is no longer on this order. Reload and try again.' ], 404 );
-		}
-		list( $index, $entry ) = $found;
-
-		if ( empty( $entry['cf_id'] ) ) {
-			wp_send_json_error( [ 'message' => 'This payment has no CashFlow record behind it and cannot be edited here. Edit it in CashFlow.' ], 409 );
-		}
-
 		$res = self::api(
-			'/plugin/advance-payments/' . rawurlencode( $entry['cf_id'] ),
+			'/plugin/advance-payments/' . rawurlencode( $payment_id ),
 			'PATCH',
 			[
 				'amount'         => $amount,
@@ -860,17 +939,6 @@ class CashFlow_Advance {
 			CashFlow_Plugin::log( 'advance_edit', 'order', $order->get_id(), 'error', $res['error'] );
 			wp_send_json_error( [ 'message' => $res['error'] ], 502 );
 		}
-
-		$payment = isset( $res['data']['payment'] ) && is_array( $res['data']['payment'] ) ? $res['data']['payment'] : [];
-		$saved   = isset( $payment['amount'] ) ? (float) $payment['amount'] : $amount;
-		$was     = isset( $entry['amount'] ) ? (float) $entry['amount'] : 0.0;
-
-		$entries[ $index ]['amount']     = $saved;
-		$entries[ $index ]['account_id'] = (string) ( ! empty( $payment['account_id'] ) ? $payment['account_id'] : $account_id );
-		$entries[ $index ]['account']    = self::account_name( $account_id );
-		$entries[ $index ]['txn']        = (string) ( ! empty( $payment['transaction_id'] ) ? $payment['transaction_id'] : $txn );
-
-		self::write_mirror( $order, $entries, self::advance_amount( $order ) - $was + $saved );
 
 		CashFlow_Plugin::log( 'advance_edit', 'order', $order->get_id(), 'success', 'Advance updated in CashFlow' );
 
@@ -885,29 +953,17 @@ class CashFlow_Advance {
 	public function ajax_delete() {
 		$order = self::guard_request();
 
-		$entry_id = self::posted_text( 'entry_id' );
-		$entries  = self::entries( $order );
-		$found    = self::find_entry( $entries, $entry_id );
-		if ( ! $found ) {
-			wp_send_json_error( [ 'message' => 'That payment is no longer on this order. Reload and try again.' ], 404 );
-		}
-		list( $index, $entry ) = $found;
-
-		if ( empty( $entry['cf_id'] ) ) {
-			wp_send_json_error( [ 'message' => 'This payment has no CashFlow record behind it and cannot be deleted here. Delete it in CashFlow.' ], 409 );
+		$payment_id = self::posted_payment_id();
+		if ( empty( $payment_id ) ) {
+			wp_send_json_error( [ 'message' => 'That payment is no longer on this order. Reload and try again.' ], 400 );
 		}
 
-		$res = self::api( '/plugin/advance-payments/' . rawurlencode( $entry['cf_id'] ), 'DELETE' );
+		$res = self::api( '/plugin/advance-payments/' . rawurlencode( $payment_id ), 'DELETE' );
 
 		if ( empty( $res['ok'] ) ) {
 			CashFlow_Plugin::log( 'advance_delete', 'order', $order->get_id(), 'error', $res['error'] );
 			wp_send_json_error( [ 'message' => $res['error'] ], 502 );
 		}
-
-		$was = isset( $entry['amount'] ) ? (float) $entry['amount'] : 0.0;
-		unset( $entries[ $index ] );
-
-		self::write_mirror( $order, $entries, self::advance_amount( $order ) - $was );
 
 		CashFlow_Plugin::log( 'advance_delete', 'order', $order->get_id(), 'success', 'Advance removed in CashFlow' );
 

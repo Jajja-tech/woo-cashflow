@@ -16,6 +16,9 @@ class CashFlow_Auth {
     // ── Pre-check ───────────────────────────────────────────────────
     public function handle_pre_check() {
         check_ajax_referer( 'cashflow_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_send_json_error( [ 'message' => 'Permission denied' ] );
+        }
         $token = CashFlow_Security::sanitize_token( $_POST['cashflow_token'] ?? '' );
         if ( empty( $token ) ) wp_send_json_error( [ 'message' => 'Token is required' ] );
 
@@ -165,6 +168,9 @@ class CashFlow_Auth {
     // ── Verify ──────────────────────────────────────────────────────
     public function handle_verify() {
         check_ajax_referer( 'cashflow_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_send_json_error( [ 'message' => 'Permission denied' ] );
+        }
         $settings = CashFlow_Plugin::get_settings();
         if ( empty( $settings['cashflow_token'] ) ) {
             wp_send_json_error( [ 'message' => 'Not connected' ] );

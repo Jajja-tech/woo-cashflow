@@ -1,0 +1,152 @@
+/**
+ * CashFlow — advance payments (order edit + orders list).
+ * Loaded only on the WooCommerce order screens by CashFlow_Advance::enqueue_assets().
+ */
+
+/* ── Status badge — one definition, used by the totals row and the list column ── */
+.cf-pay-badge {
+	display: inline-block;
+	padding: 3px 8px;
+	border-radius: 4px;
+	font-size: 11px;
+	font-weight: 700;
+	line-height: 1.5;
+	text-transform: uppercase;
+	letter-spacing: 0.4px;
+	white-space: nowrap;
+}
+.cf-pay-paid    { background: #d1e7dd; color: #0a3622; }
+.cf-pay-partial { background: #fff3cd; color: #856404; }
+.cf-pay-unpaid  { background: #f1f1f1; color: #777;    }
+
+/* ── Totals rows ── */
+.cf-adv-sep {
+	padding: 0 !important;
+	height: 1px;
+	border-top: 1px solid #e0e0e0;
+}
+
+/* ── Slide-in panel ── */
+.cf-adv-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 100000;
+	background: rgba(0, 0, 0, 0.5);
+}
+.cf-adv-panel {
+	position: absolute;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	width: 720px;
+	max-width: 100%;
+	display: flex;
+	flex-direction: column;
+	background: #fff;
+	box-shadow: -2px 0 12px rgba(0, 0, 0, 0.2);
+}
+.cf-adv-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 14px 20px;
+	border-bottom: 1px solid #e0e0e0;
+}
+.cf-adv-header h3 { margin: 0; font-size: 16px; }
+.cf-adv-close {
+	font-size: 22px;
+	line-height: 1;
+	color: #666;
+	text-decoration: none;
+	cursor: pointer;
+}
+.cf-adv-body {
+	flex: 1;
+	overflow-y: auto;
+	padding: 20px;
+}
+.cf-adv-hint {
+	margin: 0 0 14px;
+	color: #666;
+	font-size: 12px;
+}
+
+/* ── Notices ── */
+.cf-adv-notice {
+	padding: 10px 12px;
+	margin-bottom: 14px;
+	border-radius: 6px;
+	border-left: 4px solid;
+	font-size: 13px;
+}
+.cf-adv-notice-warn  { background: #fff8e5; border-color: #dba617; color: #4a3a00; }
+.cf-adv-notice-error { background: #fcf0f1; border-color: #d63638; color: #6a1518; }
+
+/* ── Entries table ── */
+.cf-adv-table-wrap {
+	width: 100%;
+	overflow-x: auto;
+	margin-bottom: 22px;
+}
+.cf-adv-table {
+	width: 100%;
+	min-width: 620px;
+	border-collapse: collapse;
+}
+.cf-adv-table th,
+.cf-adv-table td {
+	padding: 8px 10px;
+	text-align: left;
+	border-bottom: 1px solid #f0f0f0;
+	font-size: 13px;
+	word-break: break-word;
+}
+.cf-adv-table th {
+	background: #f6f7f7;
+	font-weight: 600;
+	white-space: nowrap;
+}
+.cf-adv-empty td {
+	color: #777;
+	font-style: italic;
+	text-align: center;
+	padding: 18px 10px;
+}
+.cf-adv-row-actions { white-space: nowrap; }
+.cf-adv-row-actions .button { margin-right: 4px; }
+.cf-adv-delete { color: #d63638; }
+
+/* ── Form ── */
+.cf-adv-form {
+	padding: 16px;
+	border: 1px solid #e0e0e0;
+	border-radius: 8px;
+	background: #fafafa;
+}
+.cf-adv-form h4 { margin: 0 0 12px; font-size: 14px; }
+.cf-adv-form label {
+	display: block;
+	margin: 10px 0 4px;
+	font-weight: 600;
+	font-size: 12px;
+}
+.cf-adv-form input[type="text"],
+.cf-adv-form input[type="number"],
+.cf-adv-form select {
+	width: 100%;
+	max-width: 320px;
+}
+.cf-adv-form-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 16px;
+	flex-wrap: wrap;
+}
+.cf-adv-msg { font-size: 12px; }
+/* Keeps the always-present slot from reserving blank space when there is nothing to say. */
+.cf-adv-msg:empty { display: none; }
+.cf-adv-msg-ok    { color: #0a3622; }
+.cf-adv-msg-error { color: #d63638; font-weight: 600; }
+
+.cf-adv-busy { opacity: 0.6; pointer-events: none; }

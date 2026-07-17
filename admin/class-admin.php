@@ -34,14 +34,13 @@ class CashFlow_Admin {
         if ( strpos( $hook, 'cashflow-sync' ) === false ) return;
         wp_enqueue_style(  'cashflow-admin', CASHFLOW_PLUGIN_URL . 'assets/admin.css', [], CASHFLOW_VERSION );
         wp_enqueue_script( 'cashflow-admin', CASHFLOW_PLUGIN_URL . 'assets/admin.js',  [ 'jquery' ], CASHFLOW_VERSION, true );
+        // ajaxUrl + nonce ONLY — this array is printed into the page HTML.
+        // Never localize CashFlow_Plugin::get_settings() wholesale: it carries
+        // cashflow_token (and any key later added to the option). The settings
+        // page renders its own values server-side in admin/views/settings.php.
         wp_localize_script( 'cashflow-admin', 'cashflowAdmin', [
-            'ajaxUrl'  => admin_url( 'admin-ajax.php' ),
-            'nonce'    => wp_create_nonce( 'cashflow_nonce' ),
-            'siteUrl'  => get_site_url(),
-            'settings' => CashFlow_Plugin::get_settings(),
-            'endpoints' => [
-                'ping' => get_site_url() . '/wp-json/cashflow/v1/ping',
-            ],
+            'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+            'nonce'   => wp_create_nonce( 'cashflow_nonce' ),
         ] );
     }
 

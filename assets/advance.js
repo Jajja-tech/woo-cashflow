@@ -17,6 +17,10 @@
 
 	var cfg = window.cashflowAdvance || {};
 
+	// One-way. Set when the panel loses its baseline (a write landed but CashFlow
+	// could not be read back), and only a reload clears it.
+	var locked = false;
+
 	function say( msg, isError ) {
 		var $msg = $( '#cf-adv-msg' );
 		if ( ! $msg.length ) {
@@ -37,12 +41,23 @@
 	 * on screen are no longer known to be current. Take the controls away until
 	 * the order is reloaded: same rule as a panel that could not be read at all —
 	 * no baseline, no controls. Without this the form is still sitting there
-	 * inviting the user to re-enter a payment that IS already recorded.
+	 * inviting the user to re-enter a payment that IS already recorded — and
+	 * external_id cannot save them, because it is minted per request and so
+	 * dedupes a retry of one request, never a human re-entry.
+	 *
+	 * 🔴 The `locked` flag in post() is the ENFORCEMENT. The class and the
+	 * disabled props are only the affordance: `pointer-events: none` does not stop
+	 * a keyboard Enter on a focused button, which dispatches a real click straight
+	 * into the delegated handlers. Greying a control out is not the same as
+	 * turning it off.
 	 *
 	 * Deliberately one-way. Only a reload re-establishes a baseline.
 	 */
 	function lock() {
+		locked = true;
 		$( '#cf-adv-overlay' ).addClass( 'cf-adv-locked' );
+		$( '#cf-adv-save, #cf-adv-cancel, #cf-adv-amount, #cf-adv-account, #cf-adv-txn' ).prop( 'disabled', true );
+		$( '#cf-adv-rows' ).find( '.cf-adv-edit, .cf-adv-delete' ).prop( 'disabled', true );
 	}
 
 	function resetForm() {
@@ -78,6 +93,14 @@
 	}
 
 	function post( action, data ) {
+		// 🔴 THE enforcement point for lock(). Every control funnels through here,
+		// so this catches the click however it arrived — mouse, keyboard, or a
+		// handler firing on markup that CSS was only pretending to disable.
+		if ( locked ) {
+			say( 'This panel is out of date and cannot record anything more. Reload the order.', true );
+			return;
+		}
+
 		busy( true );
 		say( '' );
 

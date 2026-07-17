@@ -79,7 +79,6 @@
 	border-left: 4px solid;
 	font-size: 13px;
 }
-.cf-adv-notice-warn  { background: #fff8e5; border-color: #dba617; color: #4a3a00; }
 .cf-adv-notice-error { background: #fcf0f1; border-color: #d63638; color: #6a1518; }
 
 /* ── Entries table ── */
@@ -150,3 +149,13 @@
 .cf-adv-msg-error { color: #d63638; font-weight: 600; }
 
 .cf-adv-busy { opacity: 0.6; pointer-events: none; }
+
+/* A write landed but CashFlow could not be read back — the rows and totals on
+   screen are no longer known to be current, so nothing more may be recorded
+   against them until the order is reloaded. The message stays readable; only the
+   controls go. */
+.cf-adv-locked .cf-adv-form,
+.cf-adv-locked .cf-adv-row-actions {
+	opacity: 0.5;
+	pointer-events: none;
+}

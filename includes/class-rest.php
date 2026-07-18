@@ -64,8 +64,11 @@ class CashFlow_REST {
         list( $ck, $cs ) = explode( ':', $decoded, 2 );
         if ( $ck === '' || $cs === '' ) return false;
         $hash = function_exists( 'wc_api_hash' ) ? wc_api_hash( $ck ) : hash_hmac( 'sha256', $ck, 'woocommerce-api' );
+        // Require write permissions: a leaked READ-ONLY WC key must not be able to
+        // authenticate /configure and poison the connection secret, escalating a
+        // read-only leak into write access on order-status/stock/courier endpoints.
         $row  = $wpdb->get_row( $wpdb->prepare(
-            "SELECT consumer_secret FROM {$wpdb->prefix}woocommerce_api_keys WHERE consumer_key = %s LIMIT 1", $hash ) );
+            "SELECT consumer_secret FROM {$wpdb->prefix}woocommerce_api_keys WHERE consumer_key = %s AND permissions IN ('write','read_write') LIMIT 1", $hash ) );
         return $row && hash_equals( (string) $row->consumer_secret, (string) $cs );
     }
 

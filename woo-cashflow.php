@@ -127,7 +127,6 @@ class CashFlow_Plugin {
                 'includes/class-security.php',
                 'includes/class-prefix.php',
                 'includes/class-statuses.php',
-                'includes/class-auth.php',
                 'includes/class-webhooks.php',
                 'includes/class-sync.php',
                 'includes/class-meta.php',
@@ -148,7 +147,6 @@ class CashFlow_Plugin {
             $modules = [
                 'CashFlow_Statuses',
                 'CashFlow_Admin',
-                'CashFlow_Auth',
                 'CashFlow_Webhooks',
                 'CashFlow_Sync',
                 'CashFlow_Meta',
@@ -195,12 +193,7 @@ class CashFlow_Plugin {
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         dbDelta( $sql );
 
-        // Generate site secret on first activation
-        if ( ! get_option( 'cashflow_site_secret' ) ) {
-            update_option( 'cashflow_site_secret', wp_generate_password( 64, false ) );
-        }
-
-        cf_on_activation(); 
+        cf_on_activation();
 
         set_transient( 'cashflow_activated', true, 30 );
     }
@@ -219,7 +212,6 @@ class CashFlow_Plugin {
     // ── Settings ───────────────────────────────────────────────────
     public static function get_settings() {
         return wp_parse_args( get_option( CASHFLOW_OPTION_KEY, [] ), [
-            'cashflow_token'    => '',
             'store_id'          => '',
             'org_id'            => '',
             'connected'         => false,

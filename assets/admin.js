@@ -68,7 +68,7 @@
 
     // ── Disconnect ─────────────────────────────────────────────────
     $('#cf-disconnect-btn').on('click', function() {
-        if (!confirm('Disconnect this store from CashFlow?\n\nThis will remove API keys and webhooks from WooCommerce.')) return;
+        if (!confirm('Disconnect this store locally? You can reconnect from the CashFlow app.')) return;
         setBtn(this, true, 'Disconnecting…');
         ajax('cashflow_disconnect', {},
             () => location.reload(),

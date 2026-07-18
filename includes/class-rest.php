@@ -4,7 +4,9 @@ defined( 'ABSPATH' ) || exit;
 /**
  * CashFlow_REST
  * Additional REST endpoints exposed by the plugin.
- * CashFlow backend calls these for plugin secret retrieval etc.
+ * Push model: `/configure` receives the connection identity + secret from
+ * the backend after WC-key-authed approval; `/status` is a public,
+ * secret-free heartbeat the app uses for its install check.
  */
 class CashFlow_REST {
 

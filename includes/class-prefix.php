@@ -25,6 +25,25 @@ function cf_generate_default_prefix() {
 }
 
 function cf_get_prefix() {
+    // Order of precedence, most authoritative first:
+    //   1. cashflow_order_prefix — pushed by CashFlow from the INTEGRATION's
+    //      settings. CashFlow owns the prefix now, so its value wins.
+    //   2. cf_order_prefix — the local option from before CashFlow pushed one.
+    //   3. CF_ORDER_PREFIX — the domain-derived default set on activation.
+    //
+    // Until this existed, /configure wrote `cashflow_order_prefix` while this
+    // read `cf_order_prefix` — two different keys — so a prefix pushed from
+    // CashFlow was stored and then never used for the displayed order number.
+    //
+    // The NUMBERING LOGIC is untouched: the prefix is still only prepended to
+    // the order number by cf_display_order_number; order ids are not affected.
+    $pushed = get_option( 'cashflow_order_prefix', '' );
+    if ( $pushed !== '' ) {
+        $pushed = sanitize_text_field( $pushed );
+        // Accept it with or without a trailing separator — CashFlow stores the
+        // bare prefix ("ZEN"), while the local option historically included it.
+        return substr( $pushed, -1 ) === '-' ? $pushed : $pushed . '-';
+    }
     $val = get_option( 'cf_order_prefix', '' );
     return $val !== '' ? sanitize_text_field( $val ) : CF_ORDER_PREFIX;
 }

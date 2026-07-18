@@ -11,7 +11,6 @@ class CashFlow_Admin {
         add_action( 'admin_menu',            [ $this, 'add_menu'          ] );
         add_action( 'admin_enqueue_scripts', [ $this, 'enqueue_assets'    ] );
         add_action( 'admin_notices',         [ $this, 'show_notices'      ] );
-        add_action( 'wp_ajax_cashflow_reregister_webhooks', [ $this, 'ajax_reregister_webhooks' ] );
         add_action( 'wp_ajax_cashflow_save_settings',       [ $this, 'ajax_save_settings'       ] );
         add_action( 'wp_ajax_cashflow_get_sync_log',        [ $this, 'ajax_get_sync_log'        ] );
     }
@@ -56,26 +55,6 @@ class CashFlow_Admin {
                 printf( '<strong>CashFlow Sync</strong> activated! <a href="%s">Connect your store →</a>', esc_url( $url ) );
             }
             echo '</p></div>';
-        }
-
-        $settings = CashFlow_Plugin::get_settings();
-        if ( ! empty( $settings['connected'] ) && empty( get_option( 'cashflow_webhook_ids' ) ) ) {
-            echo '<div class="notice notice-warning is-dismissible"><p>';
-            echo '<strong>CashFlow Sync:</strong> Webhooks are not registered. <a href="' . admin_url( 'admin.php?page=cashflow-sync' ) . '">Re-register webhooks →</a>';
-            echo '</p></div>';
-        }
-    }
-
-    public function ajax_reregister_webhooks() {
-        check_ajax_referer( 'cashflow_nonce', 'nonce' );
-        if ( ! current_user_can( 'manage_woocommerce' ) ) {
-            wp_send_json_error( [ 'message' => 'Permission denied' ] );
-        }
-        $result = ( new CashFlow_Webhooks() )->reregister_webhooks();
-        if ( $result ) {
-            wp_send_json_success( [ 'message' => 'Webhooks registered: ' . $result['registered'] . '/' . $result['total'] ] );
-        } else {
-            wp_send_json_error( [ 'message' => 'Not connected — please connect first' ] );
         }
     }
 

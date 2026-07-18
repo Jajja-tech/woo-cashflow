@@ -30,6 +30,21 @@ class CashFlow_REST {
             'permission_callback' => [ $this, 'verify_wc_key' ],
         ] );
 
+        // Remote disconnect. CashFlow calls this when a merchant disconnects the
+        // store in the app, so the plugin stops believing it is linked. Before
+        // this existed, disconnecting in CashFlow left the plugin holding its
+        // store id and secret — the merchant had to also disconnect here by hand,
+        // and usually did not know to.
+        //
+        // Gated on the CONNECTION SECRET, not a WooCommerce key: a merchant who
+        // is disconnecting has often already revoked the WC key, and this still
+        // has to work.
+        register_rest_route( 'cashflow/v1', '/disconnect', [
+            'methods'             => 'POST',
+            'callback'            => [ $this, 'disconnect' ],
+            'permission_callback' => [ $this, 'verify_connection_secret' ],
+        ] );
+
         // Sync log + status list — gated on the connection secret (reuse CashFlow_Sync's check).
         register_rest_route( 'cashflow/v1', '/sync-log', [
             'methods'             => 'GET',
@@ -127,6 +142,22 @@ class CashFlow_REST {
         nocache_headers();
         $res->header( 'Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0' );
         return $res;
+    }
+
+    public function disconnect( $request ) {
+        // Mirrors the local admin disconnect exactly (admin/class-admin.php), so
+        // remote and local disconnect leave the site in the SAME state — no
+        // second, subtly different code path to drift.
+        delete_option( 'cashflow_connection_secret' );
+        delete_option( 'cashflow_order_prefix' );
+        CashFlow_Plugin::save_settings( [
+            'connected'    => false,
+            'store_id'     => '',
+            'org_id'       => '',
+            'connected_at' => '',
+            'store_url'    => '',
+        ] );
+        return new WP_REST_Response( [ 'ok' => true, 'connected' => false ], 200 );
     }
 
     public function configure( $request ) {

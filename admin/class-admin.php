@@ -13,6 +13,7 @@ class CashFlow_Admin {
         add_action( 'admin_notices',         [ $this, 'show_notices'      ] );
         add_action( 'wp_ajax_cashflow_save_settings',       [ $this, 'ajax_save_settings'       ] );
         add_action( 'wp_ajax_cashflow_get_sync_log',        [ $this, 'ajax_get_sync_log'        ] );
+        add_action( 'wp_ajax_cashflow_disconnect',          [ $this, 'ajax_disconnect'          ] );
     }
 
     public function add_menu() {
@@ -82,6 +83,17 @@ class CashFlow_Admin {
             "SELECT * FROM {$wpdb->prefix}cashflow_sync_log ORDER BY created_at DESC LIMIT 50"
         );
         wp_send_json_success( [ 'logs' => $logs ] );
+    }
+
+    // ── Disconnect (local-only; the backend owns the connection + WC keys) ──
+    public function ajax_disconnect() {
+        check_ajax_referer( 'cashflow_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) wp_send_json_error( [ 'message' => 'Permission denied' ] );
+        delete_option( 'cashflow_connection_secret' );
+        delete_option( 'cashflow_order_prefix' );
+        CashFlow_Plugin::save_settings( [ 'connected'=>false, 'store_id'=>'', 'org_id'=>'', 'connected_at'=>'', 'store_url'=>'' ] );
+        CashFlow_Plugin::log( 'disconnect', 'store', 0, 'success', 'Local config cleared' );
+        wp_send_json_success( [ 'message' => 'Disconnected locally. Manage the connection in the CashFlow app.' ] );
     }
 
     public function render_page() {

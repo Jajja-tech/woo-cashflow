@@ -3,7 +3,7 @@
  * Plugin Name: Woo Sync For Cashflow.pk
  * Plugin URI:  https://cashflow.pk
  * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
- * Version:     6.0.0
+ * Version:     6.0.1
  * Update URI:  https://github.com/Jajja-tech/woo-cashflow
  * Author:      CashFlow.pk
  * Author URI:  https://cashflow.pk
@@ -17,7 +17,7 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Constants ──────────────────────────────────────────────────────
-define( 'CASHFLOW_VERSION',    '6.0.0' );
+define( 'CASHFLOW_VERSION',    '6.0.1' );
 define( 'CASHFLOW_PLUGIN_FILE', __FILE__ );
 define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
@@ -68,6 +68,18 @@ if ( file_exists( $cf_puc_loader ) ) {
 add_action( 'admin_notices', 'cf_pending_update_notice' );
 function cf_pending_update_notice() {
     if ( ! current_user_can( 'update_plugins' ) ) {
+        return;
+    }
+    // Never render on WordPress's own update screens. Admin notices are emitted in
+    // the admin header BEFORE the upgrader runs and clears the update_plugins
+    // transient — so on update.php this banner is drawn from pre-update state and
+    // lands directly above "Plugin updated successfully", inviting a second,
+    // pointless click on "Update now". There is no ordering in which it is correct
+    // here: re-reading the transient cannot help, because the upgrade has not run
+    // yet at notice time. update-core.php is the bulk-update screen and already
+    // lists this plugin natively, so the banner is redundant noise there too.
+    $cf_pagenow = isset( $GLOBALS['pagenow'] ) ? $GLOBALS['pagenow'] : '';
+    if ( in_array( $cf_pagenow, [ 'update.php', 'update-core.php' ], true ) ) {
         return;
     }
     $plugin_file = plugin_basename( CASHFLOW_PLUGIN_FILE );

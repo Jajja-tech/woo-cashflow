@@ -57,11 +57,7 @@ class CashFlow_REST {
     // way WooCommerce stores it, and constant-time compare the secret.
     public function verify_wc_key( $request ) {
         global $wpdb;
-        $auth = (string) $request->get_header( 'Authorization' );
-        if ( stripos( $auth, 'Basic ' ) !== 0 ) return false;
-        $decoded = base64_decode( substr( $auth, 6 ), true );
-        if ( ! $decoded || strpos( $decoded, ':' ) === false ) return false;
-        list( $ck, $cs ) = explode( ':', $decoded, 2 );
+        list( $ck, $cs ) = $this->extract_wc_credentials( $request );
         if ( $ck === '' || $cs === '' ) return false;
         $hash = function_exists( 'wc_api_hash' ) ? wc_api_hash( $ck ) : hash_hmac( 'sha256', $ck, 'woocommerce-api' );
         // Require write permissions: a leaked READ-ONLY WC key must not be able to
@@ -70,6 +66,45 @@ class CashFlow_REST {
         $row  = $wpdb->get_row( $wpdb->prepare(
             "SELECT consumer_secret FROM {$wpdb->prefix}woocommerce_api_keys WHERE consumer_key = %s AND permissions IN ('write','read_write') LIMIT 1", $hash ) );
         return $row && hash_equals( (string) $row->consumer_secret, (string) $cs );
+    }
+
+    // The WC key can arrive three ways. A number of Apache/LiteSpeed/CGI hosts
+    // strip the Authorization header before PHP ever sees it — which is
+    // indistinguishable from wrong credentials and silently breaks /configure,
+    // leaving the store "connected" in CashFlow and unconfigured here.
+    //   1. X-CashFlow-* custom headers — never stripped; what the backend sends
+    //      alongside Basic since BE v1.31.2.
+    //   2. Authorization: Basic … — the standard path, incl. the
+    //      REDIRECT_HTTP_AUTHORIZATION form mod_rewrite leaves behind.
+    //   3. PHP_AUTH_USER/PW — when PHP parsed Basic natively (mod_php).
+    // SECURITY: every path ends at the SAME write-capable woocommerce_api_keys
+    // check in verify_wc_key(). These only change how the secret is transported,
+    // never what is accepted — no path skips validation.
+    private function extract_wc_credentials( $request ) {
+        $ck = (string) $request->get_header( 'X-CashFlow-WC-Key' );
+        $cs = (string) $request->get_header( 'X-CashFlow-WC-Secret' );
+        if ( $ck !== '' && $cs !== '' ) return [ $ck, $cs ];
+
+        $auth = (string) $request->get_header( 'Authorization' );
+        if ( $auth === '' && ! empty( $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ) ) {
+            $auth = (string) $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
+        }
+        if ( $auth === '' && function_exists( 'getallheaders' ) ) {
+            foreach ( (array) getallheaders() as $name => $value ) {
+                if ( strtolower( $name ) === 'authorization' ) { $auth = (string) $value; break; }
+            }
+        }
+        if ( stripos( $auth, 'Basic ' ) === 0 ) {
+            $decoded = base64_decode( substr( $auth, 6 ), true );
+            if ( $decoded && strpos( $decoded, ':' ) !== false ) {
+                list( $u, $p ) = explode( ':', $decoded, 2 );
+                if ( $u !== '' && $p !== '' ) return [ (string) $u, (string) $p ];
+            }
+        }
+        if ( ! empty( $_SERVER['PHP_AUTH_USER'] ) && ! empty( $_SERVER['PHP_AUTH_PW'] ) ) {
+            return [ (string) $_SERVER['PHP_AUTH_USER'], (string) $_SERVER['PHP_AUTH_PW'] ];
+        }
+        return [ '', '' ];
     }
 
     public function status( $request ) {

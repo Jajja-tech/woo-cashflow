@@ -3,117 +3,22 @@ defined( 'ABSPATH' ) || exit;
 
 /**
  * CashFlow_Webhooks
- * Registers the native WooCommerce webhooks that push order/product/customer
- * events to the CashFlow backend (WooCommerce → CashFlow direction).
+ * Local WC-side order-number meta stamping only.
  *
- * The backend authenticates each delivery by verifying WooCommerce's
- * X-WC-Webhook-Signature against the store's WC consumer_secret, so we register
- * the webhooks with that consumer_secret as the signing secret and point them at
- * the backend's receive route: /stores/webhook-receive/{store_id}.
- *
- * All per-event syncing to the backend is handled by these native WC webhooks —
- * the plugin no longer POSTs order/status/product/customer changes itself.
+ * The CashFlow backend now registers and manages the native WooCommerce
+ * webhooks itself (order.created/updated/deleted → the backend's
+ * /stores/webhook-receive/{store_id} route), so this class no longer
+ * registers anything. Its only remaining job is stamping the prefixed
+ * CashFlow order number (e.g. ZEN-8522) onto new WC orders so it also
+ * shows in WC admin.
  */
 class CashFlow_Webhooks {
-
-    // Webhooks we register (topic => label). ORDER topics only: the CashFlow
-    // backend receiver only understands order webhooks — it maps any delivery to
-    // an order and upserts it. Registering product.*/customer.* here made WC
-    // deliver payloads that got mis-saved as phantom Rs.0 orders. Products and
-    // customers are synced via CashFlow's own pull (sync-products / SKU search),
-    // not webhooks, so the order topics are the complete, correct set.
-    private $webhook_topics = [
-        'order.created'    => 'Order Created',
-        'order.updated'    => 'Order Updated',
-        'order.deleted'    => 'Order Deleted',
-    ];
 
     public function __construct() {
         // Local WC-side behaviour only: stamp the CashFlow order-number meta so
         // the prefixed number (e.g. ZEN-8522) also shows in WC admin. Order data
-        // itself reaches CashFlow via the native WC webhooks registered below.
+        // itself reaches CashFlow via the native WC webhooks the backend registers.
         add_action( 'woocommerce_new_order', [ $this, 'on_order_created' ], 10, 2 );
-    }
-
-    // ── Register all webhooks via WC Webhook API ────────────────────
-    // $consumer_secret is the store's WooCommerce API consumer secret. WooCommerce
-    // signs every delivery with it (X-WC-Webhook-Signature) and the CashFlow
-    // backend verifies against the same secret. When not supplied (e.g. the admin
-    // re-register action) we read it back from the WC api-keys table.
-    public function register_all_webhooks( $token, $store_id, $signing_secret = null ) {
-        // v5: webhooks are signed with the per-connection secret (the backend
-        // verifies X-WC-Webhook-Signature against it). Fall back to the stored
-        // connection secret on the admin re-register action.
-        if ( empty( $signing_secret ) ) {
-            $signing_secret = get_option( 'cashflow_connection_secret', '' );
-        }
-
-        // Without a signing secret, WooCommerce would sign deliveries with an empty
-        // secret and the backend could never verify them. Bail loudly instead of
-        // registering silently-unverifiable webhooks.
-        if ( empty( $signing_secret ) ) {
-            CashFlow_Plugin::log( 'webhook_register', 'store', 0, 'error', 'Cannot register webhooks: connection secret unavailable — reconnect the store.' );
-            return [ 'registered' => 0, 'total' => count( $this->webhook_topics ), 'error' => 'missing_connection_secret' ];
-        }
-
-        // Backend receive route: store id AFTER the path segment.
-        $webhook_url = CASHFLOW_API_BASE . '/stores/webhook-receive/' . $store_id;
-
-        // Remove old webhooks first
-        $old_ids = get_option( 'cashflow_webhook_ids', [] );
-        foreach ( $old_ids as $id ) {
-            $wh = new WC_Webhook( $id );
-            if ( $wh->get_id() ) $wh->delete( true );
-        }
-
-        $new_ids = [];
-        $user    = wp_get_current_user();
-
-        foreach ( $this->webhook_topics as $topic => $name ) {
-            $webhook = new WC_Webhook();
-            $webhook->set_name( 'CashFlow: ' . $name );
-            $webhook->set_topic( $topic );
-            $webhook->set_delivery_url( $webhook_url );
-            $webhook->set_status( 'active' );
-            $webhook->set_user_id( $user->ID );
-            $webhook->set_secret( $signing_secret );
-            $id = $webhook->save();
-            if ( $id ) $new_ids[] = $id;
-        }
-
-        update_option( 'cashflow_webhook_ids', $new_ids );
-
-        return [
-            'registered' => count( $new_ids ),
-            'total'      => count( $this->webhook_topics ),
-        ];
-    }
-
-    // ── Re-register (called from admin) ────────────────────────────
-    public function reregister_webhooks() {
-        $settings = CashFlow_Plugin::get_settings();
-        if ( empty( $settings['connected'] ) || empty( $settings['store_id'] ) ) {
-            return false;
-        }
-        return $this->register_all_webhooks(
-            $settings['cashflow_token'],
-            $settings['store_id'],
-            $this->get_wc_consumer_secret()
-        );
-    }
-
-    // ── Read the store's WC consumer secret from the WC api-keys table ──
-    // WooCommerce stores consumer_secret in plaintext keyed by key_id; the connect
-    // flow saved that key_id in plugin settings (wc_key_id).
-    private function get_wc_consumer_secret() {
-        global $wpdb;
-        $settings = CashFlow_Plugin::get_settings();
-        $key_id   = (int) ( $settings['wc_key_id'] ?? 0 );
-        if ( ! $key_id ) return '';
-        return (string) $wpdb->get_var( $wpdb->prepare(
-            "SELECT consumer_secret FROM {$wpdb->prefix}woocommerce_api_keys WHERE key_id = %d",
-            $key_id
-        ) );
     }
 
     // ── Order Created — stamp CashFlow order-number meta (local only) ──

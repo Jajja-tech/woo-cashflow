@@ -230,17 +230,8 @@ class CashFlow_Plugin {
     // ── CashFlow API request ────────────────────────────────────────
     public static function api_request( $endpoint, $method = 'GET', $body = null, $token = null ) {
         if ( ! $token ) {
-            $settings = self::get_settings();
-            $token    = $settings['cashflow_token'] ?? '';
+            return [ 'ok' => false, 'error' => 'missing auth token', 'status' => 0, 'data' => null ];
         }
-
-        $timestamp = time();
-        $nonce     = wp_generate_password( 16, false );
-        $site_secret = get_option( 'cashflow_site_secret', '' );
-
-        // HMAC signature: method + endpoint + timestamp + nonce
-        $sig_data  = $method . $endpoint . $timestamp . $nonce;
-        $signature = hash_hmac( 'sha256', $sig_data, $site_secret );
 
         $args = [
             'method'  => $method,
@@ -248,9 +239,6 @@ class CashFlow_Plugin {
                 'Content-Type'        => 'application/json',
                 'Authorization'       => 'Bearer ' . $token,
                 'X-CashFlow-Site'     => get_site_url(),
-                'X-CashFlow-Time'     => $timestamp,
-                'X-CashFlow-Nonce'    => $nonce,
-                'X-CashFlow-Sig'      => $signature,
                 'X-Plugin-Version'    => CASHFLOW_VERSION,
             ],
             'timeout'    => 30,

@@ -109,12 +109,24 @@ class CashFlow_REST {
 
     public function status( $request ) {
         $s = CashFlow_Plugin::get_settings();
-        return new WP_REST_Response( [
+        $res = new WP_REST_Response( [
             'version'        => CASHFLOW_VERSION,
             'connected'      => ! empty( $s['connected'] ),
             'store_id'       => $s['store_id'] ?? '',
             'wc_version'     => defined( 'WC_VERSION' ) ? WC_VERSION : ( function_exists('WC') ? WC()->version : '' ),
         ], 200 );
+
+        // /status is a LIVE heartbeat: CashFlow reads it to decide whether this
+        // site really holds the connection. A managed host's proxy caching it
+        // (SiteGround does — proven on a live store 2026-07-18, x-proxy-cache:
+        // HIT) makes a freshly-connected store keep reporting connected:false
+        // for as long as the cache lives, so a healthy connection looks broken.
+        // Tell every layer not to store it. The backend also cache-busts the URL,
+        // because that proxy ignores Cache-Control on the REQUEST — this header
+        // is the response-side half, and the one that fixes other callers too.
+        nocache_headers();
+        $res->header( 'Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0' );
+        return $res;
     }
 
     public function configure( $request ) {

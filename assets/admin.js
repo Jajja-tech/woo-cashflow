@@ -12,13 +12,10 @@
         'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
         'stroke-linejoin="round" aria-hidden="true">' + paths + '</svg>';
     const IC = {
-        check:  svg('<path d="M20 6 9 17l-5-5"/>'),
-        x:      svg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),
-        ok:     svg('<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>'),
-        err:    svg('<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>'),
-        warn:   svg('<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/>'),
-        eye:    svg('<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>', 13),
-        eyeOff: svg('<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/>', 13),
+        check: svg('<path d="M20 6 9 17l-5-5"/>'),
+        x:     svg('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),
+        ok:    svg('<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>'),
+        err:   svg('<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>'),
     };
     // Brand loader — SVG port of the app's CascadeLoader (mirrors cf_logo() in
     // includes/class-icons.php). One loader language across app + plugin.
@@ -50,12 +47,6 @@
         }
     }
 
-    function step(id, state, icon) {
-        const el = $('#' + id);
-        el.removeClass('active done failed').addClass(state);
-        el.find('.cf-step-status').html(icon || '');
-    }
-
     function ajax(action, data, onOk, onErr) {
         return $.post(ajaxUrl, { action, nonce, ...data })
             .done(r => r.success ? onOk(r.data) : onErr && onErr(r.data?.message || 'Error'))
@@ -75,101 +66,12 @@
         $('.cf-panel[data-panel="' + t + '"]').addClass('is-active');
     });
 
-    // ── Token visibility toggle ────────────────────────────────────
-    $('#cf-toggle-token').on('click', function() {
-        const inp = $('#cf-token-input');
-        const isPass = inp.attr('type') === 'password';
-        inp.attr('type', isPass ? 'text' : 'password');
-        $(this).html((isPass ? IC.eyeOff : IC.eye) + ' <span>' + (isPass ? 'Hide' : 'Show') + '</span>');
-    });
-
-    // ── Connect ────────────────────────────────────────────────────
-    $('#cf-connect-btn').on('click', function() {
-        const btn   = this;
-        const token = $('#cf-token-input').val().trim();
-        const msgEl = '#cf-connect-msg';
-
-        if (!token) {
-            msg(msgEl, IC.warn + ' Please paste your CashFlow token', 'err');
-            return;
-        }
-
-        setBtn(btn, true, 'Connecting…');
-        msg(msgEl, spin + ' Starting secure connection…', 'info');
-
-        // Reset steps
-        ['cf-step-1','cf-step-2','cf-step-3','cf-step-4'].forEach(s => {
-            $('#' + s).removeClass('active done failed').find('.cf-step-status').html('');
-        });
-
-        // Step 1: Verify token
-        step('cf-step-1', 'active', spin);
-        msg(msgEl, spin + ' Step 1: Verifying your CashFlow token…', 'info');
-
-        ajax('cashflow_pre_check', { cashflow_token: token },
-            (preData) => {
-                step('cf-step-1', 'done', IC.check);
-                msg(msgEl, spin + ` Step 2: Verifying store ownership for <strong>${esc(preData.site_url)}</strong>…`, 'info');
-
-                // Step 2: Full connect (includes ownership + key gen + webhooks)
-                step('cf-step-2', 'active', spin);
-
-                ajax('cashflow_connect', { cashflow_token: token },
-                    (data) => {
-                        step('cf-step-2', 'done', IC.check);
-                        step('cf-step-3', 'done', IC.check);
-                        step('cf-step-4', 'done', IC.check);
-                        msg(msgEl, IC.ok + ` ${esc(data.message)} — ${data.webhooks?.registered || 0} webhooks registered`, 'ok');
-                        setBtn(btn, false);
-                        setTimeout(() => location.reload(), 1800);
-                    },
-                    (err) => {
-                        step('cf-step-2', 'failed', IC.x);
-                        msg(msgEl, IC.err + ` ${esc(err)}`, 'err');
-                        setBtn(btn, false);
-                    }
-                );
-            },
-            (err) => {
-                step('cf-step-1', 'failed', IC.x);
-                msg(msgEl, IC.err + ` ${esc(err)}`, 'err');
-                setBtn(btn, false);
-            }
-        );
-    });
-
     // ── Disconnect ─────────────────────────────────────────────────
     $('#cf-disconnect-btn').on('click', function() {
         if (!confirm('Disconnect this store from CashFlow?\n\nThis will remove API keys and webhooks from WooCommerce.')) return;
         setBtn(this, true, 'Disconnecting…');
         ajax('cashflow_disconnect', {},
             () => location.reload(),
-            (e) => { msg('#cf-connect-msg', IC.err + ` ${esc(e)}`, 'err'); setBtn(this, false); }
-        );
-    });
-
-    // ── Verify ─────────────────────────────────────────────────────
-    $('#cf-verify-btn').on('click', function() {
-        setBtn(this, true, 'Verifying…');
-        ajax('cashflow_verify', {},
-            (d) => {
-                let html = IC.ok + ` ${esc(d.message)}`;
-                const parts = [];
-                if (d.cashflow_api)  parts.push(`CashFlow API: ${esc(d.cashflow_api)}`);
-                if (d.rest_endpoint) parts.push(`REST: ${esc(d.rest_endpoint)}`);
-                if (parts.length) html += `<br><small>${parts.join(' &nbsp; ')}</small>`;
-                msg('#cf-connect-msg', html, 'ok');
-                setBtn(this, false);
-            },
-            (e) => { msg('#cf-connect-msg', IC.err + ` ${esc(e)}`, 'err'); setBtn(this, false); }
-        );
-    });
-
-    // ── Re-register webhooks ───────────────────────────────────────
-    $('#cf-reregister-btn').on('click', function() {
-        setBtn(this, true, 'Registering…');
-        ajax('cashflow_reregister_webhooks', {},
-            (d) => { msg('#cf-connect-msg', IC.ok + ` ${esc(d.message)}`, 'ok'); setBtn(this, false); },
             (e) => { msg('#cf-connect-msg', IC.err + ` ${esc(e)}`, 'err'); setBtn(this, false); }
         );
     });

@@ -1,9 +1,8 @@
 <?php
 defined( 'ABSPATH' ) || exit;
-$settings      = CashFlow_Plugin::get_settings();
-$connected     = ! empty( $settings['connected'] );
-$site_url      = CashFlow_Security::get_verified_site_url();
-$webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
+$settings  = CashFlow_Plugin::get_settings();
+$connected = ! empty( $settings['connected'] );
+$site_url  = CashFlow_Security::get_verified_site_url();
 ?>
 <div class="wrap cashflow-wrap">
 
@@ -59,18 +58,12 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
             <span><?php echo esc_html( $settings['connected_at'] ); ?></span>
           </div>
           <div class="cf-info-item">
-            <span class="cf-info-label">Webhooks</span>
-            <span><?php echo esc_html( $webhook_count ); ?> registered</span>
-          </div>
-          <div class="cf-info-item">
             <span class="cf-info-label">REST API</span>
             <code><?php echo esc_url( $site_url ); ?>/wp-json/cashflow/v1/ping</code>
           </div>
         </div>
         <div class="cf-actions">
-          <button class="cf-btn cf-btn-secondary" id="cf-verify-btn"><?php echo cf_icon( 'search', 15 ); ?> Verify Connection</button>
-          <button class="cf-btn cf-btn-secondary" id="cf-reregister-btn"><?php echo cf_icon( 'refresh-cw', 15 ); ?> Re-register Webhooks</button>
-          <button class="cf-btn cf-btn-danger"    id="cf-disconnect-btn"><?php echo cf_icon( 'power', 15 ); ?> Disconnect</button>
+          <button class="cf-btn cf-btn-danger" id="cf-disconnect-btn"><?php echo cf_icon( 'power', 15 ); ?> Disconnect</button>
         </div>
         <div id="cf-connect-msg" class="cf-msg" style="display:none"></div>
       </div>
@@ -158,96 +151,32 @@ $webhook_count = count( get_option( 'cashflow_webhook_ids', [] ) );
   </div>
 
   <?php else : ?>
-  <!-- ── DISCONNECTED STATE ── -->
-
-  <div class="cf-card cf-security-card">
-    <div class="cf-card-body">
-      <div class="cf-security-grid">
-        <div class="cf-security-item">
-          <span class="cf-security-ic"><?php echo cf_icon( 'shield-check', 18 ); ?></span>
-          <div>
-            <strong>Store Ownership Verified</strong>
-            <p>Your store URL is detected automatically — no one can steal another store's keys</p>
-          </div>
-        </div>
-        <div class="cf-security-item">
-          <span class="cf-security-ic"><?php echo cf_icon( 'zap', 18 ); ?></span>
-          <div>
-            <strong>Auto API Key Generation</strong>
-            <p>WooCommerce REST API keys are generated automatically — no manual copy-paste</p>
-          </div>
-        </div>
-        <div class="cf-security-item">
-          <span class="cf-security-ic"><?php echo cf_icon( 'arrow-left-right', 18 ); ?></span>
-          <div>
-            <strong>Bi-directional Sync</strong>
-            <p>Orders, inventory, courier status — sync both ways in real-time</p>
-          </div>
-        </div>
-        <div class="cf-security-item">
-          <span class="cf-security-ic"><?php echo cf_icon( 'key', 18 ); ?></span>
-          <div>
-            <strong>HMAC Signed Requests</strong>
-            <p>Every request between CashFlow and this plugin is cryptographically signed</p>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
+  <!-- ── DISCONNECTED STATE — passive guidance ── -->
 
   <div class="cf-card">
     <div class="cf-card-header">
-      <h2><?php echo cf_icon( 'plug', 16 ); ?> Connect to CashFlow</h2>
-      <p>Enter your CashFlow token — everything else is automatic</p>
+      <h2><?php echo cf_icon( 'plug', 16 ); ?> Not Connected</h2>
+      <p>This site isn't linked to a CashFlow store yet</p>
     </div>
     <div class="cf-card-body">
+
+      <p class="cf-guidance-text">
+        Connections are started from the CashFlow app, not from this plugin — there's
+        no token to paste here. Open your store's Integrations page in CashFlow and
+        connect this WooCommerce site from there; the plugin picks up the connection
+        automatically once it's made.
+      </p>
+
+      <a href="https://app.cashflow.pk/integrations" target="_blank" rel="noopener" class="cf-btn cf-btn-primary">
+        <?php echo cf_icon( 'arrow-up-right', 15 ); ?> Open CashFlow Integrations
+      </a>
 
       <div class="cf-detected-site">
         <span class="cf-detected-label"><?php echo cf_icon( 'globe', 13 ); ?> Your Store URL (auto-detected)</span>
         <code><?php echo esc_html( $site_url ); ?></code>
-        <span class="cf-detected-note">This URL will be verified with CashFlow — you cannot change it</span>
+        <span class="cf-detected-note">Confirm this matches the URL you connect to in the CashFlow app</span>
       </div>
 
-      <div class="cf-form-group">
-        <label for="cf-token-input">
-          <strong>CashFlow API Token</strong>
-          <a href="https://app.cashflow.pk/settings?tab=api" target="_blank" rel="noopener" class="cf-help-link">Where to find it? <?php echo cf_icon( 'arrow-up-right', 12 ); ?></a>
-        </label>
-        <div class="cf-token-wrap">
-          <input type="password" id="cf-token-input" placeholder="Paste your CashFlow token here…" class="cf-input" autocomplete="off">
-          <button type="button" class="cf-toggle-visibility" id="cf-toggle-token"><?php echo cf_icon( 'eye', 13 ); ?> <span>Show</span></button>
-        </div>
-        <p class="cf-input-hint">Found in CashFlow &#8594; Settings &#8594; API Tokens</p>
-      </div>
-
-      <div class="cf-connect-steps">
-        <div class="cf-step" id="cf-step-1">
-          <span class="cf-step-num">1</span>
-          <span>Verifying your CashFlow token</span>
-          <span class="cf-step-status"></span>
-        </div>
-        <div class="cf-step" id="cf-step-2">
-          <span class="cf-step-num">2</span>
-          <span>Verifying store ownership</span>
-          <span class="cf-step-status"></span>
-        </div>
-        <div class="cf-step" id="cf-step-3">
-          <span class="cf-step-num">3</span>
-          <span>Generating WooCommerce API keys</span>
-          <span class="cf-step-status"></span>
-        </div>
-        <div class="cf-step" id="cf-step-4">
-          <span class="cf-step-num">4</span>
-          <span>Registering webhooks</span>
-          <span class="cf-step-status"></span>
-        </div>
-      </div>
-
-      <button class="cf-btn cf-btn-primary cf-btn-large" id="cf-connect-btn">
-        <?php echo cf_icon( 'zap', 16 ); ?> Connect to CashFlow
-      </button>
-
-      <div id="cf-connect-msg" class="cf-msg" style="display:none"></div>
     </div>
   </div>
 

@@ -13,96 +13,90 @@ class CashFlow_REST {
     }
 
     public function register() {
-        // Return plugin secret so CashFlow can authenticate future calls
-        register_rest_route( 'cashflow/v1', '/handshake', [
-            'methods'             => 'POST',
-            'callback'            => [ $this, 'handshake' ],
-            'permission_callback' => '__return_true',
-        ] );
-
-        // Status endpoint
+        // Public heartbeat — the app's install check (no secrets).
         register_rest_route( 'cashflow/v1', '/status', [
             'methods'             => 'GET',
             'callback'            => [ $this, 'status' ],
-            'permission_callback' => [ $this, 'verify_secret' ],
+            'permission_callback' => '__return_true',
         ] );
 
-        // Sync log
+        // Backend hands the plugin its identity + connection secret after WC Approve.
+        // Authenticated by proving possession of a valid WooCommerce API key for this site.
+        register_rest_route( 'cashflow/v1', '/configure', [
+            'methods'             => 'POST',
+            'callback'            => [ $this, 'configure' ],
+            'permission_callback' => [ $this, 'verify_wc_key' ],
+        ] );
+
+        // Sync log + status list — gated on the connection secret (reuse CashFlow_Sync's check).
         register_rest_route( 'cashflow/v1', '/sync-log', [
             'methods'             => 'GET',
             'callback'            => [ $this, 'get_sync_log' ],
-            'permission_callback' => [ $this, 'verify_secret' ],
+            'permission_callback' => [ $this, 'verify_connection_secret' ],
         ] );
-
-        // Order statuses — WC default + CashFlow custom (booked, shipped, returned)
         register_rest_route( 'cashflow/v1', '/order-statuses', [
             'methods'             => 'GET',
             'callback'            => fn() => new WP_REST_Response( CashFlow_Statuses::get_all_statuses(), 200 ),
-            'permission_callback' => [ $this, 'verify_secret' ],
-        ] );
-
-        // Health check — public, no auth needed
-        register_rest_route( 'cashflow/v1', '/ping', [
-            'methods'             => 'GET',
-            'callback'            => fn() => new WP_REST_Response( [ 'status' => 'ok', 'version' => CASHFLOW_VERSION, 'site_url' => get_site_url() ], 200 ),
-            'permission_callback' => '__return_true',
+            'permission_callback' => [ $this, 'verify_connection_secret' ],
         ] );
     }
 
-    // ── Handshake — CashFlow registers its secret ───────────────────
-    public function handshake( $request ) {
-        $settings = CashFlow_Plugin::get_settings();
-        if ( empty( $settings['connected'] ) ) {
-            return new WP_Error( 'not_connected', 'Plugin not connected', [ 'status' => 403 ] );
-        }
-
-        // Verify the CashFlow token
-        $token = $request->get_header( 'Authorization' );
-        $token = str_replace( 'Bearer ', '', $token );
-
-        if ( $token !== $settings['cashflow_token'] ) {
-            return new WP_Error( 'invalid_token', 'Invalid token', [ 'status' => 401 ] );
-        }
-
-        // Return plugin secret for future authenticated requests
-        $secret = get_option( 'cashflow_plugin_secret' );
-        if ( ! $secret ) {
-            $secret = wp_generate_password( 40, false );
-            update_option( 'cashflow_plugin_secret', $secret );
-        }
-
-        return new WP_REST_Response( [
-            'success'        => true,
-            'plugin_secret'  => $secret,
-            'store_url'      => get_site_url(),
-            'wc_version'     => WC()->version,
-            'plugin_version' => CASHFLOW_VERSION,
-            'endpoints'      => [
-                'order_status'  => get_site_url() . '/wp-json/cashflow/v1/order-status',
-                'update_stock'  => get_site_url() . '/wp-json/cashflow/v1/update-stock',
-                'courier_meta'  => get_site_url() . '/wp-json/cashflow/v1/courier-meta',
-                'ping'          => get_site_url() . '/wp-json/cashflow/v1/ping',
-            ],
-        ], 200 );
+    // Backend→plugin calls authenticated by the per-connection secret (same as CashFlow_Sync).
+    public function verify_connection_secret( $request ) {
+        $secret = get_option( 'cashflow_connection_secret', '' );
+        if ( ! $secret ) return false;
+        $header = $request->get_header( 'X-CashFlow-Secret' );
+        return $header && hash_equals( $secret, (string) $header );
     }
 
-    public function verify_secret( $request ) {
-        $secret   = get_option( 'cashflow_plugin_secret', '' );
-        $header   = $request->get_header( 'X-CashFlow-Secret' );
-        return $secret && hash_equals( $secret, (string) $header );
+    // /configure auth: the caller must present a valid WooCommerce API key for THIS site
+    // (the key WC minted during Approve). A1's configurePlugin sends it as HTTP Basic
+    // (base64 of consumer_key:consumer_secret) — parse that, hash the consumer_key the same
+    // way WooCommerce stores it, and constant-time compare the secret.
+    public function verify_wc_key( $request ) {
+        global $wpdb;
+        $auth = (string) $request->get_header( 'Authorization' );
+        if ( stripos( $auth, 'Basic ' ) !== 0 ) return false;
+        $decoded = base64_decode( substr( $auth, 6 ), true );
+        if ( ! $decoded || strpos( $decoded, ':' ) === false ) return false;
+        list( $ck, $cs ) = explode( ':', $decoded, 2 );
+        if ( $ck === '' || $cs === '' ) return false;
+        $hash = function_exists( 'wc_api_hash' ) ? wc_api_hash( $ck ) : hash_hmac( 'sha256', $ck, 'woocommerce-api' );
+        $row  = $wpdb->get_row( $wpdb->prepare(
+            "SELECT consumer_secret FROM {$wpdb->prefix}woocommerce_api_keys WHERE consumer_key = %s LIMIT 1", $hash ) );
+        return $row && hash_equals( (string) $row->consumer_secret, (string) $cs );
     }
 
     public function status( $request ) {
-        $settings = CashFlow_Plugin::get_settings();
+        $s = CashFlow_Plugin::get_settings();
         return new WP_REST_Response( [
-            'connected'      => $settings['connected'] ?? false,
-            'store_id'       => $settings['store_id']  ?? '',
-            'store_url'      => get_site_url(),
-            'wc_version'     => WC()->version,
-            'plugin_version' => CASHFLOW_VERSION,
-            'php_version'    => PHP_VERSION,
-            'webhook_count'  => count( get_option( 'cashflow_webhook_ids', [] ) ),
+            'version'        => CASHFLOW_VERSION,
+            'connected'      => ! empty( $s['connected'] ),
+            'store_id'       => $s['store_id'] ?? '',
+            'wc_version'     => defined( 'WC_VERSION' ) ? WC_VERSION : ( function_exists('WC') ? WC()->version : '' ),
         ], 200 );
+    }
+
+    public function configure( $request ) {
+        $store_id = sanitize_text_field( (string) $request->get_param( 'store_id' ) );
+        $org_id   = sanitize_text_field( (string) $request->get_param( 'org_id' ) );
+        $secret   = (string) $request->get_param( 'connection_secret' );
+        $prefix   = sanitize_text_field( (string) $request->get_param( 'order_prefix' ) );
+        if ( ! $store_id || ! $secret ) {
+            return new WP_Error( 'bad_request', 'store_id and connection_secret are required', [ 'status' => 400 ] );
+        }
+        update_option( 'cashflow_connection_secret', $secret );
+        if ( $prefix !== '' ) { update_option( 'cashflow_order_prefix', $prefix ); }
+        else { delete_option( 'cashflow_order_prefix' ); }
+        CashFlow_Plugin::save_settings( [
+            'store_id'     => $store_id,
+            'org_id'       => $org_id,
+            'connected'    => true,
+            'connected_at' => current_time( 'mysql' ),
+            'store_url'    => get_site_url(),
+        ] );
+        CashFlow_Plugin::log( 'configure', 'store', 0, 'success', "Configured by backend → store $store_id" );
+        return new WP_REST_Response( [ 'ok' => true ], 200 );
     }
 
     public function get_sync_log( $request ) {

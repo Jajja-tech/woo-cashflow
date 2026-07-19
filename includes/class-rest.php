@@ -165,10 +165,25 @@ class CashFlow_REST {
         $org_id   = sanitize_text_field( (string) $request->get_param( 'org_id' ) );
         $secret   = (string) $request->get_param( 'connection_secret' );
         $prefix   = sanitize_text_field( (string) $request->get_param( 'order_prefix' ) );
+        $api_base = esc_url_raw( (string) $request->get_param( 'api_base' ) );
         if ( ! $store_id || ! $secret ) {
             return new WP_Error( 'bad_request', 'store_id and connection_secret are required', [ 'status' => 400 ] );
         }
         update_option( 'cashflow_connection_secret', $secret );
+        // The backend declares its own address. Only a valid https origin is
+        // stored — a bad value must not be able to redirect this site's
+        // outbound calls (they carry the connection secret) to an arbitrary
+        // host, and must not silently disable them either. An absent value
+        // leaves any existing setting alone, so an older backend that does not
+        // send api_base cannot wipe a working one.
+        if ( $api_base !== '' ) {
+            if ( CashFlow_Plugin::is_valid_api_base( $api_base ) ) {
+                update_option( 'cashflow_api_base', untrailingslashit( $api_base ) );
+            } else {
+                CashFlow_Plugin::log( 'configure', 'store', 0, 'error',
+                    'Rejected api_base (not a valid https origin): ' . $api_base );
+            }
+        }
         if ( $prefix !== '' ) { update_option( 'cashflow_order_prefix', $prefix ); }
         else { delete_option( 'cashflow_order_prefix' ); }
         CashFlow_Plugin::save_settings( [

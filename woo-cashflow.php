@@ -3,7 +3,7 @@
  * Plugin Name: Woo Sync For Cashflow.pk
  * Plugin URI:  https://cashflow.pk
  * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
- * Version:     6.0.5
+ * Version:     6.1.0
  * Update URI:  https://github.com/Jajja-tech/woo-cashflow
  * Author:      CashFlow.pk
  * Author URI:  https://cashflow.pk
@@ -17,11 +17,25 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Constants ──────────────────────────────────────────────────────
-define( 'CASHFLOW_VERSION',    '6.0.5' );
+define( 'CASHFLOW_VERSION',    '6.1.0' );
 define( 'CASHFLOW_PLUGIN_FILE', __FILE__ );
 define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
-define( 'CASHFLOW_API_BASE',    'https://cashflow-backend-706502592250.asia-south1.run.app' );
+// The backend's address is PUSHED by the backend itself (via /configure) and
+// stored in the `cashflow_api_base` option. This constant is only the fallback
+// for a plugin that has never been configured.
+//
+// WHY NOT A HARDCODED HOST: this used to be the raw Cloud Run URL
+// (cashflow-backend-706502592250.asia-south1.run.app), which leaked the GCP
+// project number into every merchant's WordPress install AND made run.app
+// impossible to retire — a shipped plugin version calls whatever host was
+// compiled into it. Replacing one literal with another just relocates that:
+// the NEXT host change would again need a plugin release across the whole
+// fleet, and merchants on older versions would keep calling the old host
+// forever. Letting the backend declare its own address means a host move is a
+// backend deploy, not a fleet migration. Precedent: the backend already writes
+// its own URL into merchant stores as the webhook delivery_url.
+define( 'CASHFLOW_API_BASE_DEFAULT', 'https://api.cashflow.pk' );
 define( 'CASHFLOW_OPTION_KEY',  'cashflow_sync_v2' );
 
 // ── HPOS (custom order tables) compatibility ───────────────────────
@@ -239,6 +253,36 @@ class CashFlow_Plugin {
         update_option( CASHFLOW_OPTION_KEY, array_merge( $settings, $data ) );
     }
 
+    // ── Backend base URL ────────────────────────────────────────────
+    // A stored value is only honoured if it is a syntactically valid https
+    // origin. Anything else — empty, http, garbage, a host-less string — falls
+    // back to the compiled default and SAYS SO in the sync log, rather than
+    // building a request against an empty host that would fail with a useless
+    // error (Golden Rule #6: never a silent fallback).
+    //
+    // https is required, not preferred: this request carries the connection
+    // secret in an Authorization header.
+    public static function is_valid_api_base( $url ) {
+        if ( ! is_string( $url ) || $url === '' ) { return false; }
+        $parts = wp_parse_url( $url );
+        if ( empty( $parts['scheme'] ) || empty( $parts['host'] ) ) { return false; }
+        return strtolower( $parts['scheme'] ) === 'https';
+    }
+
+    public static function api_base() {
+        $stored = get_option( 'cashflow_api_base', '' );
+        if ( self::is_valid_api_base( $stored ) ) {
+            return untrailingslashit( $stored );
+        }
+        if ( $stored !== '' ) {
+            // Stored but unusable — loud, not silent. A merchant seeing calls go
+            // to the default while an override is set needs to know why.
+            self::log( 'api_base', 'store', 0, 'error',
+                'Stored cashflow_api_base is not a valid https origin; using the default' );
+        }
+        return untrailingslashit( CASHFLOW_API_BASE_DEFAULT );
+    }
+
     // ── CashFlow API request ────────────────────────────────────────
     public static function api_request( $endpoint, $method = 'GET', $body = null, $token = null ) {
         if ( ! $token ) {
@@ -261,7 +305,7 @@ class CashFlow_Plugin {
             $args['body'] = wp_json_encode( $body );
         }
 
-        $response = wp_remote_request( CASHFLOW_API_BASE . $endpoint, $args );
+        $response = wp_remote_request( self::api_base() . $endpoint, $args );
 
         if ( is_wp_error( $response ) ) {
             return [ 'ok' => false, 'error' => $response->get_error_message(), 'status' => 0, 'data' => null ];

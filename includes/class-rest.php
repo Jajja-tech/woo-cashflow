@@ -129,6 +129,14 @@ class CashFlow_REST {
             'connected'      => ! empty( $s['connected'] ),
             'store_id'       => $s['store_id'] ?? '',
             'wc_version'     => defined( 'WC_VERSION' ) ? WC_VERSION : ( function_exists('WC') ? WC()->version : '' ),
+            // The EFFECTIVE prefix — what this site actually stamps on order
+            // numbers, after the same precedence cf_display_order_number uses.
+            // Exposed so CashFlow can VERIFY a pushed prefix instead of taking
+            // its own HTTP 200 as proof: a 2xx on /configure only proves the
+            // request was accepted. Reporting a prefix as applied when the
+            // store was still using a different one is what sent a merchant
+            // hunting a phantom conflict (bindiya.pk, 2026-07-19).
+            'order_prefix'   => function_exists( 'cf_get_prefix' ) ? cf_get_prefix() : '',
         ], 200 );
 
         // /status is a LIVE heartbeat: CashFlow reads it to decide whether this
@@ -184,8 +192,18 @@ class CashFlow_REST {
                     'Rejected api_base (not a valid https origin): ' . $api_base );
             }
         }
-        if ( $prefix !== '' ) { update_option( 'cashflow_order_prefix', $prefix ); }
-        else { delete_option( 'cashflow_order_prefix' ); }
+        // Absent vs explicitly-empty are DIFFERENT instructions, exactly as for
+        // api_base above (Rule #14 — the sibling case right there already got
+        // this right). An absent order_prefix means "not my department" and
+        // must leave the stored value alone; only an explicit empty string
+        // clears it. Treating absent as "clear" meant any /configure call that
+        // did not happen to carry a prefix wiped the one CashFlow had pushed,
+        // dropping the store back to its domain-derived local default.
+        $raw_prefix = $request->get_param( 'order_prefix' );
+        if ( $raw_prefix !== null ) {
+            if ( $prefix !== '' ) { update_option( 'cashflow_order_prefix', $prefix ); }
+            else { delete_option( 'cashflow_order_prefix' ); }
+        }
         CashFlow_Plugin::save_settings( [
             'store_id'     => $store_id,
             'org_id'       => $org_id,

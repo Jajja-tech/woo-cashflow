@@ -74,7 +74,12 @@ class CashFlow_Sync_Pull {
         // "unavailable" row (admin/views/settings.php).
         if ( ! self::is_available() ) { return; }
         if ( as_next_scheduled_action( self::TICK_HOOK ) ) { return; }
-        as_schedule_recurring_action( time() + self::INTERVAL, self::INTERVAL, self::TICK_HOOK, [], self::AS_GROUP );
+        // $unique=true: two concurrent requests can BOTH pass the pre-check
+        // above (read-then-schedule race) and register two recurring ticks
+        // — double polling forever. AS ≥3.4 refuses the duplicate itself;
+        // on an older AS the surplus arg is silently ignored by PHP and
+        // the pre-check remains the (imperfect) guard.
+        as_schedule_recurring_action( time() + self::INTERVAL, self::INTERVAL, self::TICK_HOOK, [], self::AS_GROUP, true );
     }
 
     // ── The tick ────────────────────────────────────────────────────
@@ -191,12 +196,20 @@ class CashFlow_Sync_Pull {
         }
 
         // (3c) CONFLICT GUARD — no last-write-wins. Compare in GMT: both
-        // sides are epoch seconds (WC_DateTime::getTimestamp is absolute;
-        // base_modified_at is ISO8601 UTC).
+        // sides are epoch seconds (WC_DateTime::getTimestamp is absolute).
+        // Parsed via DateTime with an EXPLICIT UTC fallback zone, not
+        // strtotime: an offset-less ISO string ("2026-08-05T12:34:56" —
+        // the shape WC's own date_modified_gmt serializes to) is read by
+        // strtotime in the PROCESS default timezone. WP sets that to UTC,
+        // but any misbehaving plugin can change it — and a +05:00 skew
+        // here silently flips real conflicts into applies. A string that
+        // DOES carry Z/+00:00 ignores the fallback zone, so this is
+        // strictly safer, never different.
         $base = isset( $job['base_modified_at'] ) ? $job['base_modified_at'] : null;
         if ( is_string( $base ) && '' !== $base ) {
-            $base_ts = strtotime( $base );
-            if ( false === $base_ts ) {
+            try {
+                $base_ts = ( new DateTime( $base, new DateTimeZone( 'UTC' ) ) )->getTimestamp();
+            } catch ( Exception $e ) {
                 return [ 'outcome' => 'failed', 'error' => 'unparseable base_modified_at: ' . $base ];
             }
             $modified = $order->get_date_modified();

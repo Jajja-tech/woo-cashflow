@@ -42,6 +42,11 @@ class CashFlow_Sync_Pull {
     const AS_GROUP      = 'cashflow';
     const STATS_OPTION  = 'cashflow_sync_pull_stats';
     const SYNC_KEY_META = 'cashflow_sync_key';
+
+    // CashFlow mints the order number for orders IT creates, before this
+    // site has seen them. Stored here so cf_display_order_number can return
+    // it instead of prefix+id — see the note in apply_create().
+    const ORDER_NUMBER_META = 'cashflow_order_number';
     const POLL_LIMIT    = 3;
     const INTERVAL      = 60; // seconds
 
@@ -159,9 +164,104 @@ class CashFlow_Sync_Pull {
      * @param array $job One job from /plugin/sync/poll.
      * @return array { outcome, error?, order? } — the ack payload pieces.
      */
+    /**
+     * Create an order WooCommerce has never seen, from CashFlow's own intent.
+     *
+     * 🔴 THE SYNC KEY IS WRITTEN IN THE SAME CALL AS THE CREATE.
+     * If a crash could land between creating the order and stamping the key,
+     * the retry would not recognise its own work and would create a SECOND
+     * order — and WooCommerce answers 200 both times, so there is no error to
+     * catch. The REST controller accepts meta_data in the create request, so
+     * the two are one atomic operation rather than two saves.
+     *
+     * 🔴 THE ORDER NUMBER IS CASHFLOW'S, NOT OURS.
+     * CashFlow minted it before we existed (e.g. 1SH-C1042) and may already
+     * have printed it on a label. It is stored as meta and cf_display_order_number
+     * returns it, so the ack hands back the same number CashFlow sent — the ack
+     * rewrites the whole row from our output, so a number of our own would
+     * silently RENAME the merchant's order at the moment it is confirmed.
+     */
+    private function apply_create( $job, $sync_key ) {
+        $applier = self::get_applier();
+        if ( ! $applier ) {
+            return [ 'outcome' => 'failed', 'error' => 'WooCommerce REST controllers unavailable' ];
+        }
+
+        // IDEMPOTENCE — the only wall a create has. A redelivered job (lease
+        // expiry after a lost ack) must find its own earlier work rather than
+        // create the order a second time.
+        $existing = self::find_order_by_sync_key( $sync_key );
+        if ( $existing instanceof WC_Order ) {
+            return [ 'outcome' => 'already_applied', 'order' => $applier->serialize( $existing ) ];
+        }
+
+        $ops  = isset( $job['ops'] ) && is_array( $job['ops'] ) ? $job['ops'] : [];
+        $body = [
+            'status'     => isset( $job['intent']['status'] ) ? (string) $job['intent']['status'] : 'on-hold',
+            'line_items' => isset( $ops['lineItems'] ) ? $ops['lineItems'] : [],
+            'meta_data'  => [
+                [ 'key' => self::SYNC_KEY_META, 'value' => $sync_key ],
+            ],
+        ];
+
+        if ( ! empty( $job['intent']['order_number'] ) ) {
+            $body['meta_data'][] = [
+                'key'   => self::ORDER_NUMBER_META,
+                'value' => (string) $job['intent']['order_number'],
+            ];
+        }
+        if ( isset( $ops['shippingLines'] ) ) { $body['shipping_lines'] = $ops['shippingLines']; }
+        if ( isset( $ops['feeLines'] ) )      { $body['fee_lines']      = $ops['feeLines']; }
+        if ( isset( $ops['couponLines'] ) )   { $body['coupon_lines']   = $ops['couponLines']; }
+        if ( ! empty( $ops['paymentMethod'] ) ) {
+            $body['payment_method']       = $ops['paymentMethod'];
+            $body['payment_method_title'] = self::payment_method_title( $ops['paymentMethod'] );
+        }
+        if ( ! empty( $job['intent']['customer'] ) && is_array( $job['intent']['customer'] ) ) {
+            $body['billing']  = $job['intent']['customer'];
+            $body['shipping'] = $job['intent']['customer'];
+        }
+
+        $created = $applier->create( $body );
+        if ( is_wp_error( $created ) ) {
+            return [ 'outcome' => 'failed', 'error' => self::describe_failure( $created ) ];
+        }
+
+        return [ 'outcome' => 'applied', 'order' => $applier->serialize( $created ) ];
+    }
+
+    /**
+     * The order carrying this job's sync key, if our earlier attempt already
+     * created it. Uses WooCommerce's own query layer so it is HPOS-safe —
+     * a $wpdb postmeta query would silently find nothing on an HPOS store.
+     */
+    private static function find_order_by_sync_key( $sync_key ) {
+        $orders = wc_get_orders( [
+            'limit'      => 1,
+            'meta_key'   => self::SYNC_KEY_META,
+            'meta_value' => $sync_key,
+            'return'     => 'objects',
+        ] );
+        return ! empty( $orders ) && $orders[0] instanceof WC_Order ? $orders[0] : null;
+    }
+
     private function apply_job( $job ) {
         $external_id = isset( $job['external_id'] ) ? (int) $job['external_id'] : 0;
         $sync_key    = isset( $job['sync_key'] ) ? (string) $job['sync_key'] : '';
+        $kind        = isset( $job['kind'] ) ? (string) $job['kind'] : 'edit';
+
+        // A CREATE has no external_id — that is the whole point of it. CashFlow
+        // wrote the order to its own table first and is telling us afterwards,
+        // so the merchant's host is no longer on the critical path of creating
+        // an order. Branch BEFORE the external_id check below, which an edit
+        // rightly requires and a create can never satisfy.
+        if ( 'create' === $kind ) {
+            if ( '' === $sync_key ) {
+                return [ 'outcome' => 'failed', 'error' => 'malformed create job: sync_key is required' ];
+            }
+            return $this->apply_create( $job, $sync_key );
+        }
+
         if ( $external_id <= 0 || '' === $sync_key ) {
             return [ 'outcome' => 'failed', 'error' => 'malformed job: external_id and sync_key are required' ];
         }

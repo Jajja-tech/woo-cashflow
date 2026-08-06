@@ -80,6 +80,23 @@ function cf_display_order_number( $number, $order ) {
         return $number;
     }
 
+    // 🔴 A CASHFLOW-CREATED ORDER KEEPS THE NUMBER CASHFLOW MINTED.
+    //
+    // CashFlow can create an order before this site has ever seen it, and mints
+    // its own number for it (e.g. 1SH-C1042) — it cannot use ours, because our
+    // number IS the WooCommerce post id and guessing the next one collides with
+    // a real website order. That number may already be printed on a courier
+    // label by the time we create the order here.
+    //
+    // Returning prefix+id for such an order silently RENAMES it: CashFlow's ack
+    // rewrites the whole order row from our output, order_number included. So a
+    // stored number always wins. Website orders are untouched and keep
+    // prefix+id exactly as before.
+    $minted = $order->get_meta( 'cashflow_order_number' );
+    if ( is_string( $minted ) && '' !== $minted ) {
+        return $minted;
+    }
+
     return cf_get_prefix() . $order->get_id();
 }
 

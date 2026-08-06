@@ -3,7 +3,7 @@
  * Plugin Name: Woo Sync For Cashflow.pk
  * Plugin URI:  https://cashflow.pk
  * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
- * Version:     6.4.0
+ * Version:     6.4.1
  * Update URI:  https://github.com/Jajja-tech/woo-cashflow
  * Author:      CashFlow.pk
  * Author URI:  https://cashflow.pk
@@ -17,7 +17,27 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Constants ──────────────────────────────────────────────────────
-define( 'CASHFLOW_VERSION',    '6.3.0' );
+// 🔴 THIS MUST EQUAL THE `Version:` HEADER ABOVE. They are two declarations of
+// one fact, and on 2026-08-06 only the header was bumped: the plugin was 6.4.0
+// and told CashFlow it was 6.3.0 on every poll. All three live stores reported
+// a version they were not running, so the only field that answers "is this
+// store up to date" was quietly wrong — and nothing on either side could tell.
+//
+// The header is what WordPress and the update checker read; this constant is
+// what the poll heartbeat (class-sync-pull.php), the /status endpoint and the
+// asset cache-busters read. A mismatch therefore ALSO serves stale admin CSS
+// and JS, because wp_enqueue_* builds the same URL for two different builds.
+// That did not bite in 6.4.0 — it changed no assets — but the next release
+// that does would ship invisible.
+//
+// Deriving this from the header with get_file_data() was considered and NOT
+// taken: it is boot-time code on a plugin that auto-updates to live merchant
+// stores, and there is no PHP on the machine this is written on, so it could
+// not be executed before shipping. A guard that runs today beats a runtime
+// change that cannot be tested — the backend suite asserts these two agree
+// (src/orderSync/pluginVersionContract.test.js), the same cross-repo mechanism
+// that already pins the wire contract.
+define( 'CASHFLOW_VERSION',    '6.4.1' );
 define( 'CASHFLOW_PLUGIN_FILE', __FILE__ );
 define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );

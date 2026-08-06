@@ -137,6 +137,12 @@ class CashFlow_REST {
             // store was still using a different one is what sent a merchant
             // hunting a phantom conflict (bindiya.pk, 2026-07-19).
             'order_prefix'   => function_exists( 'cf_get_prefix' ) ? cf_get_prefix() : '',
+            // Pull-sync heartbeat. Booleans and timestamps ONLY — /status
+            // is public and must never leak secrets or job payloads.
+            'sync_pull'      => [
+                'scheduled'    => class_exists( 'CashFlow_Sync_Pull' ) ? CashFlow_Sync_Pull::is_scheduled() : false,
+                'last_poll_at' => class_exists( 'CashFlow_Sync_Pull' ) ? CashFlow_Sync_Pull::last_poll_at() : null,
+            ],
         ], 200 );
 
         // /status is a LIVE heartbeat: CashFlow reads it to decide whether this

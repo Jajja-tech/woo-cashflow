@@ -68,6 +68,50 @@ $site_url  = CashFlow_Security::get_verified_site_url();
         <div id="cf-connect-msg" class="cf-msg" style="display:none"></div>
       </div>
     </div>
+
+    <!-- Pull Sync: order edits queued in CashFlow, applied here by the minutely poller -->
+    <?php $cf_pull = class_exists( 'CashFlow_Sync_Pull' ) ? CashFlow_Sync_Pull::status_summary() : null; ?>
+    <?php if ( $cf_pull ) : ?>
+    <div class="cf-card" style="margin-top:16px">
+      <div class="cf-card-header">
+        <h2><?php echo cf_icon( 'refresh-cw', 16 ); ?> Pull Sync</h2>
+        <p>Order edits made in CashFlow are pulled and applied to WooCommerce about once a minute</p>
+      </div>
+      <div class="cf-card-body">
+        <?php if ( ! $cf_pull['available'] ) : ?>
+          <p class="cf-guidance-text" style="color:#b32d2e">
+            <strong>Pull sync is unavailable</strong> — Action Scheduler was not found. It ships
+            inside WooCommerce, so this usually means WooCommerce is inactive or broken. Order
+            edits made in CashFlow will not be applied to this store until it is restored.
+          </p>
+        <?php else : ?>
+          <div class="cf-info-grid">
+            <div class="cf-info-item">
+              <span class="cf-info-label">Scheduled</span>
+              <span><?php echo $cf_pull['scheduled'] ? 'Yes — runs every minute' : 'Not yet scheduled'; ?></span>
+            </div>
+            <div class="cf-info-item">
+              <span class="cf-info-label">Last poll (UTC)</span>
+              <span><?php echo $cf_pull['last_poll_at'] ? esc_html( $cf_pull['last_poll_at'] ) : 'Never'; ?></span>
+            </div>
+            <div class="cf-info-item">
+              <span class="cf-info-label">Last outcome</span>
+              <span><?php echo '' !== $cf_pull['last_ack_outcome'] ? esc_html( $cf_pull['last_ack_outcome'] ) : '—'; ?></span>
+            </div>
+            <div class="cf-info-item">
+              <span class="cf-info-label">Edits applied</span>
+              <span><?php echo (int) $cf_pull['applied_count']; ?></span>
+            </div>
+          </div>
+          <?php if ( '' !== $cf_pull['last_error'] ) : ?>
+            <p class="cf-guidance-text" style="color:#b32d2e; margin-top:12px">
+              <strong>Last error:</strong> <?php echo esc_html( $cf_pull['last_error'] ); ?>
+            </p>
+          <?php endif; ?>
+        <?php endif; ?>
+      </div>
+    </div>
+    <?php endif; ?>
   </div>
 
   <!-- Panel: Sync Settings -->

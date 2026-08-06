@@ -3,7 +3,7 @@
  * Plugin Name: Woo Sync For Cashflow.pk
  * Plugin URI:  https://cashflow.pk
  * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
- * Version:     6.2.0
+ * Version:     6.3.0
  * Update URI:  https://github.com/Jajja-tech/woo-cashflow
  * Author:      CashFlow.pk
  * Author URI:  https://cashflow.pk
@@ -17,7 +17,7 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Constants ──────────────────────────────────────────────────────
-define( 'CASHFLOW_VERSION',    '6.2.0' );
+define( 'CASHFLOW_VERSION',    '6.3.0' );
 define( 'CASHFLOW_PLUGIN_FILE', __FILE__ );
 define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
@@ -158,6 +158,10 @@ class CashFlow_Plugin {
                 'includes/class-meta.php',
                 'includes/class-advance.php',
                 'includes/class-rest.php',
+                // class-order-applier.php is deliberately NOT here — it
+                // extends a WooCommerce REST controller and is lazy-loaded
+                // by CashFlow_Sync_Pull once that parent is loadable.
+                'includes/class-sync-pull.php',
             ];
             foreach ( $files as $file ) {
                 $path = CASHFLOW_PLUGIN_DIR . $file;
@@ -178,6 +182,7 @@ class CashFlow_Plugin {
                 'CashFlow_Meta',
                 'CashFlow_Advance',
                 'CashFlow_REST',
+                'CashFlow_Sync_Pull',
             ];
             foreach ( $modules as $class ) {
                 if ( class_exists( $class ) ) {
@@ -229,6 +234,12 @@ class CashFlow_Plugin {
         // Webhooks stay — admin must explicitly disconnect
         // Just clear the cron jobs
         wp_clear_scheduled_hook( 'cashflow_push_order' );
+        // Pull-sync recurring tick lives in Action Scheduler, not WP-cron.
+        // Guarded: if WooCommerce (which bundles AS) is already gone at
+        // deactivation time, there is nothing to unschedule anyway.
+        if ( function_exists( 'as_unschedule_all_actions' ) ) {
+            as_unschedule_all_actions( 'cashflow_sync_pull_tick' );
+        }
     }
 
     public static function woo_missing_notice() {

@@ -195,28 +195,39 @@ class CashFlow_Sync_Pull {
             return [ 'outcome' => 'already_applied', 'order' => $applier->serialize( $order ) ];
         }
 
-        // (3c) CONFLICT GUARD — no last-write-wins. Compare in GMT: both
-        // sides are epoch seconds (WC_DateTime::getTimestamp is absolute).
-        // Parsed via DateTime with an EXPLICIT UTC fallback zone, not
-        // strtotime: an offset-less ISO string ("2026-08-05T12:34:56" —
-        // the shape WC's own date_modified_gmt serializes to) is read by
-        // strtotime in the PROCESS default timezone. WP sets that to UTC,
-        // but any misbehaving plugin can change it — and a +05:00 skew
-        // here silently flips real conflicts into applies. A string that
-        // DOES carry Z/+00:00 ignores the fallback zone, so this is
-        // strictly safer, never different.
-        $base = isset( $job['base_modified_at'] ) ? $job['base_modified_at'] : null;
-        if ( is_string( $base ) && '' !== $base ) {
-            try {
-                $base_ts = ( new DateTime( $base, new DateTimeZone( 'UTC' ) ) )->getTimestamp();
-            } catch ( Exception $e ) {
-                return [ 'outcome' => 'failed', 'error' => 'unparseable base_modified_at: ' . $base ];
+        // (3c) CONFLICT GUARD — no last-write-wins. COMPARES THE MONEY, NOT
+        // THE CLOCK.
+        //
+        // 🔴 THIS COMPARED date_modified UNTIL 2026-08-06 AND PARKED EVERY
+        // SECOND EDIT. date_modified moves on ANY $order->save() — a gateway
+        // flip, a WP cron, another plugin, and above all OUR OWN apply of an
+        // earlier job for the same order. Observed live on 1SH-33009: job 1
+        // applied 09:00:51, job 2 with a byte-identical intent parked 09:03:45
+        // with nothing whatsoever changed. The (3b) idempotence check does not
+        // rescue it, because the second job carries a DIFFERENT sync_key.
+        //
+        // The same mistake was made and fixed twice on the backend the same day
+        // (syncKeyVerdict.js, then inboundFieldMask.js) before anyone noticed it
+        // also lived here. A conflict is only a conflict if the MONEY moved.
+        //
+        // base_modified_at is still accepted and still recorded as evidence on a
+        // parked job — it simply no longer decides anything.
+        $base_total    = isset( $job['base_total'] )    && is_numeric( $job['base_total'] )    ? (float) $job['base_total']    : null;
+        $base_shipping = isset( $job['base_shipping'] ) && is_numeric( $job['base_shipping'] ) ? (float) $job['base_shipping'] : null;
+
+        if ( null !== $base_total || null !== $base_shipping ) {
+            // Money is integer PKR on this fleet; the tolerance absorbs float
+            // noise in the JSON round-trip, never real disagreement.
+            $eps = 0.01;
+            if ( null !== $base_total && abs( (float) $order->get_total() - $base_total ) > $eps ) {
+                return [ 'outcome' => 'conflict', 'error' => 'the order total changed in WooCommerce after this edit was queued' ];
             }
-            $modified = $order->get_date_modified();
-            if ( $modified && $modified->getTimestamp() > $base_ts ) {
-                return [ 'outcome' => 'conflict', 'error' => 'the order changed in WooCommerce after this edit was queued' ];
+            if ( null !== $base_shipping && abs( (float) $order->get_shipping_total() - $base_shipping ) > $eps ) {
+                return [ 'outcome' => 'conflict', 'error' => 'the order shipping changed in WooCommerce after this edit was queued' ];
             }
         }
+        // No money base recorded = no check ran. Deliberately NOT falling back
+        // to the clock: that fallback is the defect this replaced.
 
         $ops  = ( isset( $job['ops'] ) && is_array( $job['ops'] ) ) ? $job['ops'] : [];
         $body = [ 'id' => $order->get_id() ]; // prepare_object_for_database loads the order from $request['id']

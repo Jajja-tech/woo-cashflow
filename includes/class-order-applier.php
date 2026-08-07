@@ -127,6 +127,84 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
     }
 
     /**
+     * Create a NEW order from a CashFlow-composed body.
+     *
+     * 🔴 THIS METHOD DID NOT EXIST AND THE WHOLE CREATE PATH CALLED IT
+     * (live-readiness review, 2026-08-07). class-sync-pull.php's apply_create
+     * called $applier->create( $body ) against a class declaring only apply()
+     * and serialize(). Every create would have thrown "Call to undefined
+     * method", acked `failed`, burnt six attempts and parked red — the order
+     * would have stayed in CashFlow forever and never reached WooCommerce.
+     *
+     * The plugin suite was green throughout because tests/bootstrap.php
+     * declared a standalone REPLACEMENT class of the same name rather than a
+     * subclass, and get_applier() only requires the real file when the class
+     * does not already exist — so the real applier was never loaded under test.
+     * The harness now EXTENDS this class, so a missing method fails loudly.
+     *
+     * Deliberately mirrors apply() rather than reusing it: prepare_object_for_
+     * database( $request, TRUE ) is the creating form, totals are recalculated
+     * unconditionally (a new order has none to preserve — the "money moved by
+     * an edit that never mentioned money" hazard apply() guards against cannot
+     * arise), and the sync key is stamped BEFORE the save so a redelivery can
+     * find our own earlier work. That last point is the create path's ONLY
+     * idempotence: without the key on the order, a lost ack creates a SECOND
+     * real order for the same job.
+     *
+     * @param array $body REST v3 order shape (line_items, billing, meta_data…).
+     * @return WC_Order|WP_Error
+     */
+    public function create( array $body ) {
+        try {
+            $request = new WP_REST_Request( 'POST', '/wc/v3/orders' );
+            foreach ( $body as $key => $value ) {
+                $request->set_param( $key, $value );
+            }
+
+            $order = $this->prepare_object_for_database( $request, true );
+            if ( is_wp_error( $order ) ) {
+                return $order;
+            }
+
+            // Core parity (save_object): gateways loaded so gateway hooks fire.
+            if ( function_exists( 'WC' ) && is_callable( [ WC(), 'payment_gateways' ] ) ) {
+                WC()->payment_gateways();
+            }
+
+            $order->calculate_totals( true );
+
+            // Coupons AFTER totals and BEFORE the save, same ordering and same
+            // self-gating as apply(). calculate_coupons THROWS WC_REST_Exception
+            // on an invalid coupon; is_wp_error kept as belt for future WC.
+            if ( null !== $request->get_param( 'coupon_lines' ) ) {
+                $coupons = $this->calculate_coupons( $request, $order );
+                if ( is_wp_error( $coupons ) ) {
+                    return $coupons;
+                }
+            }
+
+            $order->save();
+
+            // set_paid runs AFTER the save so payment_complete() acts on a real,
+            // persisted order — core's own ordering in create_item.
+            if ( ! empty( $body['set_paid'] ) ) {
+                $order->payment_complete();
+            }
+
+            // Re-read for the same reason apply() does: the legacy data store
+            // writes post_modified without refreshing the in-memory object, and
+            // the ack's date_modified_gmt becomes the next job's base.
+            $saved = wc_get_order( $order->get_id() );
+            return $saved instanceof WC_Order ? $saved : $order;
+        } catch ( WC_REST_Exception $e ) {
+            // Must precede WC_Data_Exception — it extends it in core.
+            return new WP_Error( $e->getErrorCode(), $e->getMessage(), [ 'status' => $e->getCode() ] );
+        } catch ( WC_Data_Exception $e ) {
+            return new WP_Error( $e->getErrorCode(), $e->getMessage(), $e->getErrorData() );
+        }
+    }
+
+    /**
      * The full REST v3 order payload, exactly as core would return it —
      * the ack contract requires prepare_object_for_response's output
      * verbatim (the backend reads date_modified_gmt from it).

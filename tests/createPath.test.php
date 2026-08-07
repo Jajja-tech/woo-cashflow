@@ -12,14 +12,6 @@
 require_once __DIR__ . '/bootstrap.php';
 require_once dirname( __DIR__ ) . '/includes/class-sync-pull.php';
 
-$pass = 0; $fail = 0;
-
-function ok( string $what, bool $cond, string $detail = '' ): void {
-    global $pass, $fail;
-    if ( $cond ) { $pass++; echo "  ✔ $what\n"; }
-    else { $fail++; echo "  ✖ $what" . ( $detail ? " — $detail" : '' ) . "\n"; }
-}
-
 /** apply_create is private by design; reflection runs the REAL method. */
 function apply_create( array $job ) {
     $m = new ReflectionMethod( 'CashFlow_Sync_Pull', 'apply_create' );
@@ -125,5 +117,4 @@ $edit = [ 'job_id' => 'j2', 'kind' => 'edit', 'sync_key' => 'cf_k', 'external_id
 $res5 = apply_job( $edit );
 ok( 'an EDIT with no external_id is still refused', ( $res5['outcome'] ?? '' ) === 'failed', json_encode( $res5 ) );
 
-echo "\n$pass passed, $fail failed\n";
-exit( $fail === 0 ? 0 : 1 );
+summary();

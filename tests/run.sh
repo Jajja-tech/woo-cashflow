@@ -12,9 +12,17 @@ done
 [ $fail -eq 0 ] && echo "✔ lint: all files parse"
 [ $fail -ne 0 ] && exit 1
 
+# A test file that FATALLY ERRORS must not be able to look like one that
+# passed. applierContract.test.php died on an undefined function and the run
+# still read as clean, because the only visible summary came from the file
+# that happened to run last.
 for t in tests/*.test.php; do
   echo ""
   echo "── $t"
-  php "$t" || fail=1
+  if ! php "$t"; then
+    echo "✖ $t exited non-zero (a fatal error counts as a failure)"
+    fail=1
+  fi
 done
+[ $fail -ne 0 ] && echo "" && echo "✖ one or more test files failed"
 exit $fail

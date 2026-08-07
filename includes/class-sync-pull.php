@@ -204,6 +204,17 @@ class CashFlow_Sync_Pull {
             ],
         ];
 
+        // WooCommerce's DISPLAY CACHE. The plugin's own orders-list column,
+        // totals row and status filter render off this meta and cannot call
+        // CashFlow per row — so without it a CashFlow-created order with an
+        // advance reads as fully unpaid in WP admin.
+        if ( ! empty( $job['intent']['meta'] ) && is_array( $job['intent']['meta'] ) ) {
+            foreach ( $job['intent']['meta'] as $key => $value ) {
+                if ( '' === $key || null === $value ) continue;
+                $body['meta_data'][] = [ 'key' => (string) $key, 'value' => (string) $value ];
+            }
+        }
+
         if ( ! empty( $job['intent']['order_number'] ) ) {
             $body['meta_data'][] = [
                 'key'   => self::ORDER_NUMBER_META,
@@ -213,6 +224,9 @@ class CashFlow_Sync_Pull {
         if ( isset( $ops['shippingLines'] ) ) { $body['shipping_lines'] = $ops['shippingLines']; }
         if ( isset( $ops['feeLines'] ) )      { $body['fee_lines']      = $ops['feeLines']; }
         if ( isset( $ops['couponLines'] ) )   { $body['coupon_lines']   = $ops['couponLines']; }
+        if ( ! empty( $job['intent']['set_paid'] ) ) {
+            $body['set_paid'] = true;
+        }
         if ( ! empty( $ops['paymentMethod'] ) ) {
             $body['payment_method']       = $ops['paymentMethod'];
             $body['payment_method_title'] = self::payment_method_title( $ops['paymentMethod'] );

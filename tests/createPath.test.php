@@ -71,6 +71,18 @@ ok( 'the customer becomes both address slots',
     ( $body['billing']['city'] ?? null ) === 'MULTAN' && ( $body['shipping']['city'] ?? null ) === 'MULTAN' );
 ok( 'the status comes from the intent', ( $body['status'] ?? null ) === 'processing' );
 
+echo "\nthe display cache WooCommerce renders from\n";
+CF_TestState::reset();
+$withMeta = $JOB;
+$withMeta['intent']['meta'] = [ 'cashflow_advance_amount' => '300', 'cashflow_courier_name' => 'postex' ];
+apply_create( $withMeta );
+$m = [];
+foreach ( CF_TestState::$created[0]['meta_data'] ?? [] as $e ) { $m[ $e['key'] ] = $e['value']; }
+ok( 'the advance display cache is written', ( $m['cashflow_advance_amount'] ?? null ) === '300',
+    'without it a CashFlow-created order reads as fully unpaid in WP admin' );
+ok( 'the courier name is written', ( $m['cashflow_courier_name'] ?? null ) === 'postex' );
+ok( 'and the sync key is still there beside it', ( $m['cashflow_sync_key'] ?? null ) === 'cf_abc123' );
+
 echo "\nidempotence — a redelivered job must not create a second order\n";
 $res2 = apply_create( $JOB );   // same sync key, order now exists
 ok( 'the second attempt reports already_applied', ( $res2['outcome'] ?? '' ) === 'already_applied', json_encode( $res2 ) );

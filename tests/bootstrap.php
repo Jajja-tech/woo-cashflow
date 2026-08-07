@@ -53,13 +53,44 @@ class WP_Error {
 // ── WooCommerce ──────────────────────────────────────────────────────────
 class WC_Order {
     private array $meta = [];
+    // 🔴 DEFAULTS TO WooCommerce's OWN DEFAULT, not to whatever was asked for.
+    // A stub that starts at the requested status could never reproduce H1 —
+    // the whole defect was that nothing applied the request's status, so the
+    // order stayed at WooCommerce's default `pending`.
+    public string $status = 'pending';
+    public array $calls = [];
     public function __construct( private int $id, array $meta = [] ) { $this->meta = $meta; }
     public function get_id() { return $this->id; }
     public function get_meta( $key, $single = true ) { return $this->meta[ $key ] ?? ''; }
     public function update_meta_data( $key, $value ) { $this->meta[ $key ] = $value; }
-    public function get_status() { return 'on-hold'; }
-    public function save() { return $this->id; }
+    public function get_status() { return $this->status; }
+    public function set_status( $s, $note = '', $manual = false ) { $this->status = (string) $s; $this->calls[] = 'set_status'; }
+    public function set_created_via( $v ) { $this->calls[] = 'set_created_via'; }
+    public function set_prices_include_tax( $v ) { $this->calls[] = 'set_prices_include_tax'; }
+    public function calculate_totals( $tax = true ) { $this->calls[] = 'calculate_totals'; }
+    public function payment_complete() { $this->calls[] = 'payment_complete'; }
+    public function save() { $this->calls[] = 'save'; CF_TestState::$orders[ $this->id ] = $this; return $this->id; }
     public function all_meta() { return $this->meta; }
+}
+
+function wc_get_order( $id ) { return CF_TestState::$orders[ $id ] ?? false; }
+class WC_REST_Exception extends Exception {
+    public function __construct( private string $code_, string $msg, private int $status_ = 400 ) { parent::__construct( $msg, $status_ ); }
+    public function getErrorCode() { return $this->code_; }
+}
+class WC_Data_Exception extends Exception {
+    public function getErrorCode() { return 'wc_data_error'; }
+    public function getErrorData() { return []; }
+}
+class WP_REST_Request implements ArrayAccess {
+    private array $p = [];
+    public function __construct( public string $method = 'GET', public string $route = '/' ) {}
+    public function set_param( $k, $v ) { $this->p[ $k ] = $v; }
+    public function get_param( $k ) { return $this->p[ $k ] ?? null; }
+    public function offsetExists( $k ): bool { return isset( $this->p[ $k ] ); }
+    #[\ReturnTypeWillChange] public function offsetGet( $k ) { return $this->p[ $k ] ?? null; }
+    public function offsetSet( $k, $v ): void { $this->p[ $k ] = $v; }
+    public function offsetUnset( $k ): void { unset( $this->p[ $k ] ); }
 }
 
 /**
@@ -80,27 +111,62 @@ function wc_get_orders( $args = [] ) {
     return $out;
 }
 
-// Present so get_applier() resolves; the applier itself is stubbed below.
-class WC_REST_Orders_Controller {}
-
 /**
- * Stands in for CashFlow_Order_Applier. `create()` RECORDS the payload — that
- * payload is the contract this harness exists to assert on.
+ * 🔴 THE REAL APPLIER NOW RUNS (sixth pass, 2026-08-07).
+ *
+ * This file used to declare a standalone REPLACEMENT class named
+ * CashFlow_Order_Applier. get_applier() only requires the real file
+ * `if ( ! class_exists(...) )`, so the real applier NEVER LOADED under test —
+ * and the double was strictly more capable than production. That is how a
+ * missing create() shipped, and a mutation proved it again afterwards:
+ * replacing create()'s entire body with an immediate error left 20/20 green.
+ *
+ * So the controller below stubs only what WooCommerce itself provides, and the
+ * REAL CashFlow_Order_Applier extends it. Its logic — status, coupon ordering,
+ * set_paid, the post-save re-read — is now genuinely executed.
+ *
+ * What this still does NOT prove: that WooCommerce behaves as modelled here.
+ * prepare_object_for_database deliberately SKIPS status (both V2 and V3 have
+ * the comment "Status change should be done later so transitions have new
+ * data"), which is exactly what this stub reproduces — the real integration
+ * still needs a live store.
  */
-class CashFlow_Order_Applier {
-    public function create( array $body ) {
-        CF_TestState::$created[] = $body;
-        $meta = [];
-        foreach ( $body['meta_data'] ?? [] as $m ) { $meta[ $m['key'] ] = $m['value']; }
-        $order = new WC_Order( CF_TestState::$next_id++, $meta );
-        CF_TestState::$orders[ $order->get_id() ] = $order;
+class WC_REST_Orders_Controller {
+    protected function prepare_object_for_database( $request, $creating = false ) {
+        $order = new WC_Order( CF_TestState::$next_id++ );
+        CF_TestState::$created[] = self::request_to_body( $request );
+        foreach ( (array) $request->get_param( 'meta_data' ) as $m ) {
+            if ( isset( $m['key'] ) ) { $order->update_meta_data( $m['key'], $m['value'] ?? '' ); }
+        }
+        // Status is DELIBERATELY not applied — see the class docblock.
         return $order;
     }
-    public function serialize( $order ) {
-        return [ 'id' => $order->get_id(), 'number' => $order->get_meta( 'cashflow_order_number' ) ?: (string) $order->get_id() ];
+    protected function calculate_coupons( $request, $order ) { return true; }
+    protected function prepare_object_for_response( $order, $request ) {
+        return new class( $order ) {
+            public function __construct( private $o ) {}
+            public function get_data() {
+                return [
+                    'id' => $this->o->get_id(),
+                    'number' => $this->o->get_meta( 'cashflow_order_number' ) ?: (string) $this->o->get_id(),
+                    'status' => $this->o->get_status(),
+                ];
+            }
+        };
     }
-    public function apply( $request, $sync_key ) { return null; }
+    private static function request_to_body( $request ) {
+        $out = [];
+        foreach ( [ 'status', 'line_items', 'meta_data', 'billing', 'shipping', 'shipping_lines',
+                    'fee_lines', 'coupon_lines', 'set_paid', 'payment_method', 'payment_method_title',
+                    'customer_note' ] as $k ) {
+            $v = $request->get_param( $k );
+            if ( null !== $v ) { $out[ $k ] = $v; }
+        }
+        return $out;
+    }
 }
+
+require_once __DIR__ . '/../includes/class-order-applier.php';
 
 // ── the shared assertion helper ───────────────────────────────────────────
 // 🔴 IT LIVED IN createPath.test.php, so a SECOND test file calling ok() died

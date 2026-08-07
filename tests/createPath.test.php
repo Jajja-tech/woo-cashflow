@@ -63,6 +63,22 @@ ok( 'shipping lines are passed through', ( $body['shipping_lines'][0]['method_id
 ok( 'the customer becomes both address slots',
     ( $body['billing']['city'] ?? null ) === 'MULTAN' && ( $body['shipping']['city'] ?? null ) === 'MULTAN' );
 ok( 'the status comes from the intent', ( $body['status'] ?? null ) === 'processing' );
+
+// 🔴 AND IT MUST REACH THE ORDER, NOT JUST THE REQUEST BODY (H1, sixth pass).
+// WooCommerce's REST controller SKIPS status in prepare_object_for_database
+// deliberately — "Status change should be done later so transitions have new
+// data" — and applies it in save_object(), which this applier bypasses. So the
+// order was created at WooCommerce's default `pending`; the ack then mapped
+// that back and flipped CashFlow's own row to Pending too. On a store with
+// hold-stock configured, woocommerce_cancel_unpaid_orders CANCELS a pending
+// order within the hour, and `pending` does not reduce stock while `processing`
+// does. Asserting the BODY alone could never see this.
+$createdOrder = CF_TestState::$orders[ array_key_last( CF_TestState::$orders ) ] ?? null;
+ok( 'the status reaches the ORDER, not just the request body',
+    $createdOrder && $createdOrder->get_status() === 'processing',
+    'got ' . ( $createdOrder ? $createdOrder->get_status() : 'no order' ) );
+ok( 'and the ack reports that status back to CashFlow',
+    ( $res['order']['status'] ?? null ) === 'processing' );
 // N4: the retired createOrderFromWoo sent this as customer_note and the port
 // dropped it, so a note typed into CashFlow never reached the person packing
 // the parcel — while CashFlow's create modal still claimed it did.
@@ -82,13 +98,17 @@ $body = CF_TestState::$created[0] ?? [];
 echo "\nthe display cache WooCommerce renders from\n";
 CF_TestState::reset();
 $withMeta = $JOB;
-$withMeta['intent']['meta'] = [ 'cashflow_advance_amount' => '300', 'cashflow_courier_name' => 'postex' ];
+// The UNDERSCORED key is the one every plugin reader uses, and the value is
+// the plugin's own <select> option — the backend stopped sending the slug under
+// the bare key on 2026-08-07 (B4).
+$withMeta['intent']['meta'] = [ 'cashflow_advance_amount' => '300', '_cashflow_courier_name' => 'PostEx' ];
 apply_create( $withMeta );
 $m = [];
 foreach ( CF_TestState::$created[0]['meta_data'] ?? [] as $e ) { $m[ $e['key'] ] = $e['value']; }
 ok( 'the advance display cache is written', ( $m['cashflow_advance_amount'] ?? null ) === '300',
     'without it a CashFlow-created order reads as fully unpaid in WP admin' );
-ok( 'the courier name is written', ( $m['cashflow_courier_name'] ?? null ) === 'postex' );
+ok( 'the courier name is written under the key the plugin reads',
+    ( $m['_cashflow_courier_name'] ?? null ) === 'PostEx' );
 ok( 'and the sync key is still there beside it', ( $m['cashflow_sync_key'] ?? null ) === 'cf_abc123' );
 
 echo "\nidempotence — a redelivered job must not create a second order\n";

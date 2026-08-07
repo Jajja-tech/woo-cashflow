@@ -101,6 +101,14 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
                 }
             }
 
+            // Parity with create() above: prepare_object_for_database never
+            // applies status. Latent on this path today — buildDesiredOps does
+            // not emit one — but a silent no-op is how the create bug survived,
+            // so close it here rather than rely on a caller staying quiet.
+            if ( ! empty( $request['status'] ) ) {
+                $order->set_status( (string) $request['status'] );
+            }
+
             // Stamped AFTER coupons, BEFORE the save — see the docblock.
             $order->update_meta_data( 'cashflow_sync_key', (string) $sync_key );
 
@@ -197,6 +205,26 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
                 if ( is_wp_error( $coupons ) ) {
                     return $coupons;
                 }
+            }
+
+            // 🔴 STATUS IS NOT SET BY prepare_object_for_database — EVER.
+            // (H1, sixth pass 2026-08-07.) Both the V2 and V3 controllers skip
+            // it deliberately, with the comment "Status change should be done
+            // later so transitions have new data", and apply it in
+            // save_object() — which this applier bypasses by design.
+            //
+            // So a merchant creating an order marked Processing got one at
+            // WooCommerce's default `pending`; the ack then mapped that back and
+            // flipped CashFlow's own row to Pending too, and replayPlatformState
+            // re-asserted the wrong value, so it could not self-heal. On any
+            // store with hold-stock configured, WooCommerce's
+            // woocommerce_cancel_unpaid_orders cron then CANCELS the order
+            // within the hour — and `pending` does not reduce stock, while
+            // `processing` does.
+            //
+            // Set after coupons and before the save, exactly where core puts it.
+            if ( ! empty( $body['status'] ) ) {
+                $order->set_status( (string) $body['status'] );
             }
 
             $order->save();

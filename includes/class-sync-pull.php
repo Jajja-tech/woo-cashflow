@@ -238,6 +238,21 @@ class CashFlow_Sync_Pull {
             $body['line_items'] = $ops['lineItems'];
         }
 
+        // 🔴 STATUS. Absent until 2026-08-07, and the omission was silent:
+        // the backend's ops carried no status, this body never asked for one,
+        // and the applier had no set_status anywhere — so every confirmation an
+        // operator made in CashFlow was saved into WooCommerce with the status
+        // untouched, acked back stale, and written over their own decision.
+        // 40 reverts across 35 orders in 26 hours, every job acked `applied`.
+        //
+        // `! empty` deliberately: absent and blank are both "assert nothing",
+        // matching buildDesiredOps, which omits the key rather than sending ''.
+        // CashFlow's own vocabulary (booked/shipped/returned) rides verbatim —
+        // class-statuses.php registers those with WooCommerce.
+        if ( ! empty( $ops['status'] ) && is_string( $ops['status'] ) ) {
+            $body['status'] = $ops['status'];
+        }
+
         if ( ! empty( $ops['paymentMethod'] ) && is_string( $ops['paymentMethod'] ) ) {
             $body['payment_method']       = $ops['paymentMethod'];
             $body['payment_method_title'] = self::payment_method_title( $ops['paymentMethod'] );

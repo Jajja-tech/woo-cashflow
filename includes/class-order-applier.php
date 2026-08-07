@@ -101,6 +101,23 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
                 }
             }
 
+            // 🔴 STATUS — the one field prepare_object_for_database NEVER
+            // applies. Both the V2 and V3 controllers carry the same comment
+            // ("Status change should be done later so transitions have new
+            // data") and core sets it in save_object(), which this class
+            // deliberately bypasses. So a status in the request silently
+            // evaporated: the order saved with its old status, the ack
+            // reported that old status, and the backend wrote it back over the
+            // operator's confirmation. Live 2026-08-06→07: 40 reverts, 35
+            // orders, every job acked `applied` and nothing logged anywhere.
+            //
+            // Set here — after coupons, before the save — which is exactly
+            // where core puts it, so the transition hooks see the new data and
+            // the status persists on the SAME save as the economics.
+            if ( ! empty( $request['status'] ) ) {
+                $order->set_status( (string) $request['status'] );
+            }
+
             // Stamped AFTER coupons, BEFORE the save — see the docblock.
             $order->update_meta_data( 'cashflow_sync_key', (string) $sync_key );
 

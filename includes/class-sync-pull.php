@@ -236,6 +236,14 @@ class CashFlow_Sync_Pull {
             $body['shipping'] = $job['intent']['customer'];
         }
 
+        // The merchant's delivery note. The retired createOrderFromWoo sent
+        // this as customer_note and the port dropped it, so a note typed into
+        // CashFlow ("leave at the gate") never reached the person packing the
+        // parcel — while CashFlow's own create modal still claimed it did.
+        if ( ! empty( $job['intent']['note'] ) ) {
+            $body['customer_note'] = (string) $job['intent']['note'];
+        }
+
         $created = $applier->create( $body );
         if ( is_wp_error( $created ) ) {
             return [ 'outcome' => 'failed', 'error' => self::describe_failure( $created ) ];

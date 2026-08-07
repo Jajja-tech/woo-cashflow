@@ -42,6 +42,7 @@ $JOB = [
         'status'       => 'processing',
         'order_number' => '1SH-C1042',
         'customer'     => [ 'first_name' => 'M Hamza', 'phone' => '0327', 'address_1' => 'Old road', 'city' => 'MULTAN' ],
+        'note'         => 'Leave at the gate',
     ],
     'ops' => [
         'lineItems'     => [ [ 'product_id' => 16964, 'quantity' => 2, 'total' => '1058' ] ],
@@ -70,6 +71,21 @@ ok( 'shipping lines are passed through', ( $body['shipping_lines'][0]['method_id
 ok( 'the customer becomes both address slots',
     ( $body['billing']['city'] ?? null ) === 'MULTAN' && ( $body['shipping']['city'] ?? null ) === 'MULTAN' );
 ok( 'the status comes from the intent', ( $body['status'] ?? null ) === 'processing' );
+// N4: the retired createOrderFromWoo sent this as customer_note and the port
+// dropped it, so a note typed into CashFlow never reached the person packing
+// the parcel — while CashFlow's create modal still claimed it did.
+ok( 'the delivery note reaches the store',
+    ( $body['customer_note'] ?? null ) === 'Leave at the gate' );
+
+CF_TestState::reset();
+$noNote = $JOB;
+unset( $noNote['intent']['note'] );
+apply_create( $noNote );
+ok( 'an absent note sets no customer_note at all',
+    ! array_key_exists( 'customer_note', CF_TestState::$created[0] ?? [] ) );
+CF_TestState::reset();
+apply_create( $JOB );
+$body = CF_TestState::$created[0] ?? [];
 
 echo "\nthe display cache WooCommerce renders from\n";
 CF_TestState::reset();

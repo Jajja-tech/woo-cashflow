@@ -140,7 +140,11 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
      * declared a standalone REPLACEMENT class of the same name rather than a
      * subclass, and get_applier() only requires the real file when the class
      * does not already exist — so the real applier was never loaded under test.
-     * The harness now EXTENDS this class, so a missing method fails loudly.
+     * The guard is tests/applierContract.test.php, which reads THIS FILE's
+     * source and asserts every method class-sync-pull.php invokes is declared
+     * here. It proves the method EXISTS; it does not prove it WORKS — the
+     * harness still substitutes a double, so no plugin test executes this code.
+     * Verifying that needs a live store.
      *
      * Deliberately mirrors apply() rather than reusing it: prepare_object_for_
      * database( $request, TRUE ) is the creating form, totals are recalculated
@@ -169,6 +173,18 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
             // Core parity (save_object): gateways loaded so gateway hooks fire.
             if ( function_exists( 'WC' ) && is_callable( [ WC(), 'payment_gateways' ] ) ) {
                 WC()->payment_gateways();
+            }
+
+            // Core parity (save_object's CREATING branch): both of these are
+            // set BEFORE totals are calculated. prices_include_tax is money —
+            // on a tax-inclusive store, omitting it makes calculate_totals
+            // treat tax-inclusive line prices as exclusive and the order total
+            // comes out wrong, silently. Zero impact on this fleet today (tax
+            // is 0 on all 16,619 live orders) and none whatsoever the day a
+            // merchant turns it on.
+            $order->set_created_via( 'rest-api' );
+            if ( function_exists( 'get_option' ) ) {
+                $order->set_prices_include_tax( 'yes' === get_option( 'woocommerce_prices_include_tax' ) );
             }
 
             $order->calculate_totals( true );

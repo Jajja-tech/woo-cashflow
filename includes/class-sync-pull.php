@@ -246,7 +246,15 @@ class CashFlow_Sync_Pull {
 
         $created = $applier->create( $body );
         if ( is_wp_error( $created ) ) {
-            return [ 'outcome' => 'failed', 'error' => self::describe_failure( $created ) ];
+            // 🔴 get_error_message(), NOT describe_failure() (B6, fifth pass
+            // 2026-08-07). describe_failure takes the api_request ARRAY and
+            // indexes it; handed a WP_Error it throws "Cannot use object of
+            // type WP_Error as array", which the per-job catch swallows — so
+            // every failed create acked that one PHP-internals string for six
+            // attempts and WooCommerce's real reason ("Product with ID 4821
+            // does not exist.") was destroyed. The edit path one screen away
+            // already does this correctly.
+            return [ 'outcome' => 'failed', 'error' => $created->get_error_message() ];
         }
 
         return [ 'outcome' => 'applied', 'order' => $applier->serialize( $created ) ];

@@ -258,6 +258,36 @@ class CashFlow_Sync_Pull {
             $body['payment_method_title'] = self::payment_method_title( $ops['paymentMethod'] );
         }
 
+        // 🔴 BILLING / SHIPPING — added 2026-08-17, and the omission here was the
+        // last door the address edit could not get through.
+        //
+        // CashFlow's operators retype unusable addresses so a courier can find
+        // the house ("Hfiz.Jamll.matro.asteshan" → "Hafiz Jamal Metro Station").
+        // That edit was sent by DIRECT PUSH from CashFlow's server to the store —
+        // the one hop the host's bot-wall poisons — so it was refused every time
+        // (12 refusals in one morning), and until CashFlow took ownership of the
+        // order the next webhook wrote the customer's raw text back over it.
+        // 1SH-33042 shipped to Peshawar instead of Hangu because of exactly this.
+        //
+        // Nothing in the applier needed changing: billing/shipping go through
+        // WooCommerce's own prepare_object_for_database, which DOES apply them
+        // (unlike status, the one field it skips by design), and the applier
+        // already gates calculate_totals on isset($request['billing']) —
+        // core's own rule, because an address can move a tax or shipping zone.
+        // The body simply never carried them.
+        //
+        // array_key_exists, not `! empty`: an address is a PARTIAL object by
+        // nature (a merchant may correct address_1 and nothing else), so the
+        // absent-vs-present distinction is the contract, exactly as for the line
+        // categories below. WooCommerce merges the given keys over the existing
+        // address, so a partial object updates rather than blanks the rest.
+        if ( array_key_exists( 'billing', $ops ) && is_array( $ops['billing'] ) ) {
+            $body['billing'] = $ops['billing'];
+        }
+        if ( array_key_exists( 'shipping', $ops ) && is_array( $ops['shipping'] ) ) {
+            $body['shipping'] = $ops['shipping'];
+        }
+
         // (3d) RECONCILE — the first wall. ABSENT key = do not touch that
         // category at all; [] = remove every existing line; entries =
         // desired end-state. array_key_exists, not isset: the absent-vs-

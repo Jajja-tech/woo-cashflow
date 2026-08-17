@@ -16,11 +16,25 @@ done
 # passed. applierContract.test.php died on an undefined function and the run
 # still read as clean, because the only visible summary came from the file
 # that happened to run last.
+# 🔴 AND A FILE THAT NEVER CALLS summary() MUST NOT BE ABLE TO PASS EITHER.
+# bootstrap.php claims "a file cannot forget to report" — it can. addressApply
+# ran 11 assertions, called no summary(), and exited 0; a broken assertion in it
+# would have been invisible. summary() is what turns $fail into an exit code, so
+# without it the file is a test that cannot fail. Checked here rather than
+# trusted, because the previous version of this comment was already wrong once.
 for t in tests/*.test.php; do
   echo ""
   echo "── $t"
   if ! php "$t"; then
     echo "✖ $t exited non-zero (a fatal error counts as a failure)"
+    fail=1
+  fi
+  # ⚠️ MUST MATCH AN UNCOMMENTED CALL. The first version of this guard was
+  # `grep -q 'summary()'`, which a commented-out `// summary();` satisfies — so
+  # it passed a file it was written to catch. Same trap as the image-proxy and
+  # courier-badge guards: a check its own prose can satisfy proves nothing.
+  if ! grep -qE '^[[:space:]]*summary\(\)' "$t"; then
+    echo "✖ $t never calls summary() — its assertions cannot fail the run"
     fail=1
   fi
 done

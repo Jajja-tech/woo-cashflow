@@ -284,6 +284,12 @@ class WC_REST_Orders_Controller {
                     throw new WC_REST_Exception( 'woocommerce_rest_required_product_reference', 'Product ID or SKU is required.', 400 );
                 }
             }
+            // Core's WC_Abstract_Order::set_currency throws WC_Data_Exception
+            // 'order_invalid_currency' for a code not in get_woocommerce_currencies().
+            $cur = $request->get_param( 'currency' );
+            if ( $cur && ! in_array( $cur, [ 'PKR', 'USD', 'GBP', 'EUR', 'AED' ], true ) ) {
+                throw new WC_Data_Exception( 'order_invalid_currency', 'Invalid currency code', 400 );
+            }
         } else {
             $order = ( $id > 0 && isset( CF_TestState::$orders[ $id ] ) )
                 ? CF_TestState::$orders[ $id ]

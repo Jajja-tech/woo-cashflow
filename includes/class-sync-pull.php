@@ -475,7 +475,7 @@ class CashFlow_Sync_Pull {
      * the order shows the store's own wording. Falls back to the id — a raw
      * "cod" label beats an empty one.
      */
-    private static function payment_method_title( $method_id ) {
+    public static function payment_method_title( $method_id ) {
         if ( function_exists( 'WC' ) && is_callable( [ WC(), 'payment_gateways' ] ) && WC()->payment_gateways() ) {
             $gateways = WC()->payment_gateways()->payment_gateways();
             if ( isset( $gateways[ $method_id ] ) && is_callable( [ $gateways[ $method_id ], 'get_title' ] ) ) {

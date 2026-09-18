@@ -143,6 +143,341 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
         }
     }
 
+    // ── Create (command order.create@1) ─────────────────────────────
+
+    /** The ONLY keys order.create@1 may carry, at every level. */
+    const CREATE_SCHEMA = [
+        'command'       => [ 'command_id', 'kind', 'capability', 'idempotency_key', 'attempt', 'order' ],
+        'order'         => [ 'order_number', 'status', 'currency', 'customer', 'address', 'customer_note',
+                             'payment_method', 'line_items', 'shipping_lines', 'fee_lines', 'meta',
+                             'money_display', 'expected_total' ],
+        'customer'      => [ 'first_name', 'last_name', 'phone', 'email' ],
+        'address'       => [ 'address_1', 'address_2', 'city', 'state', 'postcode', 'country' ],
+        'line_items'    => [ 'product_id', 'variation_id', 'quantity', 'subtotal', 'total' ],
+        'shipping_lines'=> [ 'method_id', 'method_title', 'total' ],
+        'fee_lines'     => [ 'name', 'total' ],
+        'money_display' => [ 'advance_amount', 'cod_amount', 'payment_status' ],
+    ];
+
+    /**
+     * Meta keys the plugin writes ITSELF on a created order. The free `meta`
+     * map may not carry them: a map that set cashflow_command_key would break
+     * the idempotency wall, and one that set the money keys would contradict
+     * money_display on the same save.
+     */
+    const CREATE_RESERVED_META = [
+        'cashflow_order_number', 'cashflow_command_key', 'cashflow_advance_amount',
+        'cashflow_cod_amount', 'cashflow_payment_status', 'cashflow_sync_key',
+    ];
+
+    const META_ORDER_NUMBER = 'cashflow_order_number';
+    const META_COMMAND_KEY  = 'cashflow_command_key';
+
+    /**
+     * Create the WooCommerce copy of an order CashFlow already owns.
+     *
+     * CashFlow has saved the order and minted its number (<prefix>-C<n>) before
+     * this ever runs. This method only makes the store's copy, once, and says
+     * truthfully what happened:
+     *
+     *   created          — made it now
+     *   already_created  — a previous delivery made it (lost ack, lease expiry)
+     *   rejected         — the store cannot accept THIS payload; retrying the
+     *                      same payload can never succeed (unknown field,
+     *                      missing product, invalid status, WooCommerce's own
+     *                      validation) — the backend must not retry
+     *   failed           — something transient went wrong; nothing was kept
+     *
+     * ONE TRANSACTION. The idempotency key and the order commit together: a
+     * crash between "order exists" and "order carries the key" would make the
+     * redelivery create a SECOND order, which is the exact failure this
+     * command exists to prevent.
+     *
+     * @param array $command One entry of the poll's `commands`.
+     * @return array { outcome, order?, error?: { code, message } }
+     */
+    public function create( array $command ) {
+        $bad = self::validate_create_command( $command );
+        if ( $bad ) {
+            return self::create_result( 'rejected', null, $bad[0], $bad[1] );
+        }
+        $o   = $command['order'];
+        $key = (string) $command['idempotency_key'];
+        $num = (string) $o['order_number'];
+
+        // (1) IDEMPOTENCY — the wall against a duplicate order. Looked up
+        // across EVERY status INCLUDING TRASH: `'status' => 'any'` excludes
+        // trash in both storages (OrdersTableQuery::process_status and
+        // WP_Query drop exclude_from_search statuses), so a merchant trashing
+        // the order before our ack landed would otherwise let the redelivery
+        // create it again.
+        $found = self::find_by_meta( self::META_COMMAND_KEY, $key );
+        if ( $found ) {
+            return self::create_result( 'already_created', $this->serialize( $found ) );
+        }
+        // The NUMBER is CashFlow's identity and must name one order here too.
+        // A different key carrying the same number means a copy already exists
+        // under an earlier command — creating another would put two WooCommerce
+        // orders behind one CashFlow number.
+        $clash = self::find_by_meta( self::META_ORDER_NUMBER, $num );
+        if ( $clash ) {
+            return self::create_result( 'rejected', null, 'order_number_in_use',
+                sprintf( 'Order number %s is already on WooCommerce order #%d (created by a different command).', $num, $clash->get_id() ) );
+        }
+
+        // (2) PRODUCTS — checked by us, because WooCommerce does not.
+        // Core's prepare_line_items does `$product = wc_get_product( $id )` and
+        // then `if ( $product && … )`: an id that is not a product is NOT an
+        // error, the line is simply created with no product behind it. The
+        // order would take money for nothing that can be picked, packed or
+        // restocked. So a missing, trashed or mismatched product is a refusal.
+        foreach ( $o['line_items'] as $i => $li ) {
+            $pid = (int) ( $li['product_id'] ?? 0 );
+            $vid = (int) ( $li['variation_id'] ?? 0 );
+            $use = $vid > 0 ? $vid : $pid;
+            $product = $use > 0 ? wc_get_product( $use ) : false;
+            if ( ! $product || 'trash' === $product->get_status() ) {
+                return self::create_result( 'rejected', null, 'invalid_product',
+                    sprintf( 'Line %d: product #%d does not exist in this store.', $i + 1, $use ) );
+            }
+            if ( $vid > 0 && $pid > 0 && (int) $product->get_parent_id() !== $pid ) {
+                return self::create_result( 'rejected', null, 'invalid_product',
+                    sprintf( 'Line %d: variation #%d does not belong to product #%d.', $i + 1, $vid, $pid ) );
+            }
+        }
+
+        // (3) STATUS — checked by us, because WooCommerce does not refuse it
+        // either: WC_Data::set_status turns an unregistered status into
+        // `pending` without a word. A pending order is cancelled by the
+        // unpaid-order cron and never reduces stock.
+        $status = preg_replace( '/^wc-/', '', (string) $o['status'] );
+        if ( ! array_key_exists( 'wc-' . $status, wc_get_order_statuses() ) ) {
+            return self::create_result( 'rejected', null, 'invalid_status',
+                sprintf( 'Status "%s" is not an order status on this store.', $status ) );
+        }
+
+        $request = new WP_REST_Request( 'POST', '/wc/v3/orders' );
+        $request->set_body_params( self::create_body( $o ) );
+
+        $started = false;
+        try {
+            wc_transaction_query( 'start' );
+            $started = true;
+
+            // Core's own creating form: new WC_Order(0), addresses via
+            // update_address, lines via set_item, currency/customer/payment
+            // via their setters. Status and coupons are skipped by core here.
+            $order = $this->prepare_object_for_database( $request, true );
+            if ( is_wp_error( $order ) ) {
+                wc_transaction_query( 'rollback' );
+                return self::create_result( 'rejected', null, $order->get_error_code(), $order->get_error_message() );
+            }
+
+            // Stamped BEFORE the first save, so no save of this order can ever
+            // exist without its key — even on a host where transactions are
+            // not honoured (MyISAM tables, WC_USE_TRANSACTIONS false).
+            foreach ( (array) ( $o['meta'] ?? [] ) as $mk => $mv ) {
+                $order->update_meta_data( (string) $mk, (string) $mv );
+            }
+            $md = (array) ( $o['money_display'] ?? [] );
+            $order->update_meta_data( 'cashflow_advance_amount', (string) ( $md['advance_amount'] ?? '0' ) );
+            $order->update_meta_data( 'cashflow_cod_amount', (string) ( $md['cod_amount'] ?? '0' ) );
+            $order->update_meta_data( 'cashflow_payment_status', (string) ( $md['payment_status'] ?? '' ) );
+            $order->update_meta_data( self::META_ORDER_NUMBER, $num );
+            $order->update_meta_data( self::META_COMMAND_KEY, $key );
+
+            // Core parity (save_object, $creating branch).
+            if ( function_exists( 'WC' ) && is_callable( [ WC(), 'payment_gateways' ] ) ) {
+                WC()->payment_gateways();
+            }
+            $order->set_created_via( 'cashflow' );
+            $order->set_prices_include_tax( 'yes' === get_option( 'woocommerce_prices_include_tax' ) );
+            $order->save();
+            // A new order has no totals to preserve, so the recalculation is
+            // unconditional — exactly core's creating branch. (calculate_totals
+            // itself ends in a save; all of it sits inside the transaction.)
+            $order->calculate_totals( true );
+
+            // 🔴 STATUS BEFORE THE FINAL SAVE, never after. prepare skips it by
+            // design; if nothing sets it the order stays `pending`, the unpaid
+            // cron cancels it, and stock is not reduced. Set here, where core's
+            // save_object sets it, so the transition hooks (stock, emails) see
+            // the finished order.
+            $order->set_status( $status );
+            // set_paid is NEVER applied: CashFlow owns the money, and
+            // payment_complete() would record a payment nobody made.
+            $order->save();
+
+            wc_transaction_query( 'commit' );
+            $started = false;
+        } catch ( WC_Data_Exception $e ) {
+            // WooCommerce's own validation (WC_REST_Exception extends this):
+            // an invalid email, currency, product reference. The same payload
+            // can never succeed, so it is a refusal carrying WooCommerce's
+            // own words — not a failure the backend would retry six times.
+            if ( $started ) { wc_transaction_query( 'rollback' ); }
+            return self::create_result( 'rejected', null, $e->getErrorCode(), $e->getMessage() );
+        } catch ( Throwable $e ) {
+            if ( $started ) { wc_transaction_query( 'rollback' ); }
+            return self::create_result( 'failed', null, 'exception', $e->getMessage() );
+        }
+
+        // Re-read, as apply() does: the legacy data store does not refresh the
+        // in-memory object's date_modified on save.
+        $saved = wc_get_order( $order->get_id() );
+        $saved = $saved instanceof WC_Order ? $saved : $order;
+
+        // The ack carries the RE-READ order, so if another plugin's hook moved
+        // the status on save, CashFlow is told the truth, not what was asked.
+        return self::create_result( 'created', $this->serialize( $saved ) );
+    }
+
+    /**
+     * The REST v3 body core's creating prepare consumes. The address goes to
+     * billing AND shipping — CashFlow keeps ONE address per order. Guest order
+     * (customer_id 0): CashFlow owns the customer, so no WP user is made.
+     */
+    private static function create_body( array $o ) {
+        $c = (array) ( $o['customer'] ?? [] );
+        $a = (array) ( $o['address'] ?? [] );
+        $who = [
+            'first_name' => (string) ( $c['first_name'] ?? '' ),
+            'last_name'  => (string) ( $c['last_name'] ?? '' ),
+            'phone'      => (string) ( $c['phone'] ?? '' ),
+        ];
+        $where = [];
+        foreach ( self::CREATE_SCHEMA['address'] as $k ) {
+            if ( isset( $a[ $k ] ) ) { $where[ $k ] = (string) $a[ $k ]; }
+        }
+        $billing = $who + $where;
+        // An empty email is left out, not sent: set_billing_email('') is fine
+        // in core, but a blank key reads as an assertion in every other part
+        // of this contract.
+        if ( ! empty( $c['email'] ) ) { $billing['email'] = (string) $c['email']; }
+
+        $method = (string) ( $o['payment_method'] ?? '' );
+        $body = [
+            'currency'      => (string) ( $o['currency'] ?? '' ),
+            'customer_id'   => 0,
+            'billing'       => $billing,
+            'shipping'      => $who + $where,
+            'customer_note' => (string) ( $o['customer_note'] ?? '' ),
+            'line_items'    => [],
+            'shipping_lines'=> [],
+            'fee_lines'     => [],
+        ];
+        if ( '' === $body['currency'] ) { unset( $body['currency'] ); }
+        if ( '' !== $method ) {
+            $body['payment_method']       = $method;
+            $body['payment_method_title'] = class_exists( 'CashFlow_Sync_Pull' )
+                ? CashFlow_Sync_Pull::payment_method_title( $method )
+                : $method;
+        }
+        foreach ( $o['line_items'] as $li ) {
+            $line = [ 'product_id' => (int) $li['product_id'], 'quantity' => (int) $li['quantity'] ];
+            if ( ! empty( $li['variation_id'] ) ) { $line['variation_id'] = (int) $li['variation_id']; }
+            // CashFlow's prices win: core first sets the catalogue price, then
+            // maybe_set_item_props overwrites it with the posted total/subtotal.
+            foreach ( [ 'subtotal', 'total' ] as $k ) {
+                if ( isset( $li[ $k ] ) ) { $line[ $k ] = (string) $li[ $k ]; }
+            }
+            $body['line_items'][] = $line;
+        }
+        foreach ( (array) ( $o['shipping_lines'] ?? [] ) as $sl ) {
+            $body['shipping_lines'][] = [
+                'method_id'    => (string) ( $sl['method_id'] ?? '' ),
+                'method_title' => (string) ( $sl['method_title'] ?? '' ),
+                'total'        => (string) ( $sl['total'] ?? '0' ),
+            ];
+        }
+        foreach ( (array) ( $o['fee_lines'] ?? [] ) as $fl ) {
+            // Signed: a negative fee IS the discount (no coupons on created orders).
+            $body['fee_lines'][] = [ 'name' => (string) ( $fl['name'] ?? '' ), 'total' => (string) ( $fl['total'] ?? '0' ) ];
+        }
+        return $body;
+    }
+
+    /**
+     * Refuse anything outside order.create@1 — loudly, naming the path. A key
+     * we do not understand is a field the operator set and would silently
+     * lose; `coupon_codes` in particular is not in @1 (the Director removed
+     * coupons from CashFlow-created orders), so it must not be half-honoured.
+     *
+     * @return array|null [ code, message ] or null when valid.
+     */
+    private static function validate_create_command( array $cmd ) {
+        $unknown = function ( $arr, $allowed, $path ) {
+            foreach ( array_keys( (array) $arr ) as $k ) {
+                if ( ! in_array( $k, $allowed, true ) ) {
+                    return [ 'unsupported_field', sprintf( '%s%s is not part of order.create@1.', $path, $k ) ];
+                }
+            }
+            return null;
+        };
+        if ( $e = $unknown( $cmd, self::CREATE_SCHEMA['command'], '' ) ) { return $e; }
+        if ( empty( $cmd['idempotency_key'] ) || ! is_string( $cmd['idempotency_key'] ) ) {
+            return [ 'invalid_payload', 'idempotency_key is required.' ];
+        }
+        if ( ! isset( $cmd['order'] ) || ! is_array( $cmd['order'] ) ) {
+            return [ 'invalid_payload', 'order is required.' ];
+        }
+        $o = $cmd['order'];
+        if ( $e = $unknown( $o, self::CREATE_SCHEMA['order'], 'order.' ) ) { return $e; }
+        foreach ( [ 'customer', 'address', 'money_display' ] as $obj ) {
+            if ( isset( $o[ $obj ] ) ) {
+                if ( ! is_array( $o[ $obj ] ) ) { return [ 'invalid_payload', "order.$obj must be an object." ]; }
+                if ( $e = $unknown( $o[ $obj ], self::CREATE_SCHEMA[ $obj ], "order.$obj." ) ) { return $e; }
+            }
+        }
+        foreach ( [ 'line_items', 'shipping_lines', 'fee_lines' ] as $list ) {
+            if ( ! isset( $o[ $list ] ) ) { continue; }
+            if ( ! is_array( $o[ $list ] ) ) { return [ 'invalid_payload', "order.$list must be a list." ]; }
+            foreach ( $o[ $list ] as $i => $line ) {
+                if ( ! is_array( $line ) ) { return [ 'invalid_payload', "order.{$list}[$i] must be an object." ]; }
+                if ( $e = $unknown( $line, self::CREATE_SCHEMA[ $list ], "order.{$list}[$i]." ) ) { return $e; }
+            }
+        }
+        if ( empty( $o['order_number'] ) || ! is_string( $o['order_number'] ) ) {
+            return [ 'invalid_payload', 'order.order_number is required.' ];
+        }
+        if ( empty( $o['status'] ) || ! is_string( $o['status'] ) ) {
+            return [ 'invalid_payload', 'order.status is required.' ];
+        }
+        if ( empty( $o['line_items'] ) ) {
+            return [ 'invalid_payload', 'order.line_items must name at least one product.' ];
+        }
+        if ( isset( $o['meta'] ) ) {
+            if ( ! is_array( $o['meta'] ) ) { return [ 'invalid_payload', 'order.meta must be an object.' ]; }
+            foreach ( $o['meta'] as $mk => $mv ) {
+                if ( in_array( (string) $mk, self::CREATE_RESERVED_META, true ) ) {
+                    return [ 'unsupported_field', sprintf( 'order.meta.%s is written by the plugin itself and may not be sent.', $mk ) ];
+                }
+                if ( ! is_scalar( $mv ) && null !== $mv ) {
+                    return [ 'invalid_payload', sprintf( 'order.meta.%s must be a plain value.', $mk ) ];
+                }
+            }
+        }
+        return null;
+    }
+
+    /** One order carrying this meta value, across every status incl. trash. */
+    private static function find_by_meta( $key, $value ) {
+        $found = wc_get_orders( [
+            'meta_key'   => $key,
+            'meta_value' => $value,
+            'status'     => array_merge( array_keys( wc_get_order_statuses() ), [ 'trash' ] ),
+            'limit'      => 1,
+        ] );
+        return ( ! empty( $found ) && $found[0] instanceof WC_Order ) ? $found[0] : null;
+    }
+
+    private static function create_result( $outcome, $order = null, $code = null, $message = null ) {
+        $out = [ 'outcome' => $outcome ];
+        if ( null !== $order ) { $out['order'] = $order; }
+        if ( null !== $code )  { $out['error'] = [ 'code' => (string) $code, 'message' => (string) $message ]; }
+        return $out;
+    }
+
     /**
      * The full REST v3 order payload, exactly as core would return it —
      * the ack contract requires prepare_object_for_response's output

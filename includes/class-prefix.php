@@ -80,7 +80,57 @@ function cf_display_order_number( $number, $order ) {
         return $number;
     }
 
+    // An order CashFlow created carries its OWN number (<prefix>-C<n>), minted
+    // by CashFlow and never changed: courier bookings, printed labels and the
+    // activity log all point at it. Showing prefix + WooCommerce id instead
+    // would give the same order two names — one on the label, another in WP
+    // admin, the customer's email and My Account.
+    if ( is_object( $order ) && method_exists( $order, 'get_meta' ) ) {
+        $cf_number = (string) $order->get_meta( 'cashflow_order_number' );
+        if ( '' !== $cf_number ) {
+            return $cf_number;
+        }
+    }
+
     return cf_get_prefix() . $order->get_id();
+}
+
+/**
+ * The WooCommerce id of the order whose CashFlow number is $search, or 0.
+ *
+ * Admin search otherwise strips the prefix and searches by id, so "1SH-C12"
+ * became "C12" and found nothing: a C number is not an id. Accepts the number
+ * with or without the prefix and a leading '#'. Used by BOTH the legacy
+ * (posts) and the HPOS search below.
+ */
+function cf_find_cashflow_numbered_order_id( $search ) {
+    if ( ! function_exists( 'wc_get_orders' ) ) return 0;
+
+    $search = strtoupper( trim( (string) $search ) );
+    if ( substr( $search, 0, 1 ) === '#' ) {
+        $search = substr( $search, 1 );
+    }
+    // Only a C-series shape is looked up; everything else keeps the old path.
+    if ( ! preg_match( '/(^|-)C\d+$/', $search ) ) return 0;
+
+    $prefix     = strtoupper( cf_get_prefix() );
+    $candidates = [ $search ];
+    if ( stripos( $search, $prefix ) !== 0 ) {
+        $candidates[] = $prefix . $search;   // "C12" typed without the prefix
+    }
+
+    foreach ( $candidates as $candidate ) {
+        $ids = wc_get_orders( [
+            'meta_key'   => 'cashflow_order_number',
+            'meta_value' => $candidate,
+            'limit'      => 1,
+            'return'     => 'ids',
+        ] );
+        if ( ! empty( $ids ) ) {
+            return (int) $ids[0];
+        }
+    }
+    return 0;
 }
 
 // ============================================
@@ -103,6 +153,15 @@ function cf_normalize_order_search() {
 
     if ( substr( $search, 0, 1 ) === '#' ) {
         $search = substr( $search, 1 );
+    }
+
+    // A CashFlow number resolves to its order's id, which the legacy search
+    // matches directly (it adds a numeric term as a post ID).
+    $cf_id = cf_find_cashflow_numbered_order_id( $search );
+    if ( $cf_id > 0 ) {
+        $_GET['s']     = (string) $cf_id;
+        $_REQUEST['s'] = (string) $cf_id;
+        return;
     }
 
     $prefix = cf_get_prefix();
@@ -129,6 +188,14 @@ function cf_hpos_search_args( $args ) {
         $search = substr( $search, 1 );
     }
 
+    // HPOS: same resolution. The lookup below calls wc_get_orders without an
+    // 's', so re-entering this filter returns at the top — no recursion.
+    $cf_id = cf_find_cashflow_numbered_order_id( $search );
+    if ( $cf_id > 0 ) {
+        $args['s'] = (string) $cf_id;
+        return $args;
+    }
+
     $prefix = cf_get_prefix();
 
     if ( stripos( $search, $prefix ) === 0 ) {
@@ -139,4 +206,14 @@ function cf_hpos_search_args( $args ) {
     }
 
     return $args;
+}
+
+// Legacy (posts) search also LIKE-matches the order meta fields listed here, so
+// a partial CashFlow number ("C12" inside "1SH-C12") is found as well.
+add_filter( 'woocommerce_shop_order_search_fields', 'cf_search_cashflow_number_field' );
+
+function cf_search_cashflow_number_field( $fields ) {
+    $fields   = (array) $fields;
+    $fields[] = 'cashflow_order_number';
+    return array_values( array_unique( $fields ) );
 }

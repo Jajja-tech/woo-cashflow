@@ -93,6 +93,19 @@ ok( 'a lock inside the expiry is NOT taken: failed, nothing created', ( $r['outc
 ok( "and the other run's lock is left exactly as it was", lock_row() === $fresh, json_encode( lock_row() ) );
 ok( 'the expiry outlives the backend lease (300s) by a wide margin', CashFlow_Order_Applier::CREATE_LOCK_STALE_AFTER >= 600 );
 
+// Two runs find the SAME stale lock. The other one takes it over in the gap
+// between our read and our update; our compare-and-swap must then miss.
+lock_store();
+CF_TestState::$db_options[ 'cashflow_create_lock_' . md5( KEY ) ] = $stale;
+$rival = time() . ':rival';
+CF_TestState::$after_lock_read = function () use ( $rival ) {
+    CF_TestState::$db_options[ 'cashflow_create_lock_' . md5( KEY ) ] = $rival;
+};
+$r = $applier->create( lock_cmd() );
+ok( 'losing the takeover race to another run: failed, nothing created', ( $r['outcome'] ?? '' ) === 'failed'
+    && ( $r['error']['code'] ?? '' ) === 'create_locked' && orders_for() === 0, json_encode( $r ) );
+ok( "and the winner's lock is untouched", lock_row() === $rival, json_encode( lock_row() ) );
+
 echo "── the lock is always released\n";
 lock_store();
 CF_TestState::$throw_on_calculate_totals = new RuntimeException( 'deadlock found' );

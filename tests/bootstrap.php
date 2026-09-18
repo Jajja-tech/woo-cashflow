@@ -40,6 +40,7 @@ class CF_TestState {
     public static ?Throwable $throw_on_calculate_totals = null;
     public static ?Throwable $throw_on_get_orders = null;   // a DB error in a lookup
     public static $on_calculate_totals = null;               // callable: run something mid-create
+    public static $after_lock_read = null;                   // callable: runs once, right after a lock SELECT
     public static array $db_options = [];                    // the options TABLE the lock rows live in
     public static array $sql = [];                           // every statement $wpdb ran
     public static array $filters = [];       // hook => callbacks registered by add_filter
@@ -58,6 +59,7 @@ class CF_TestState {
         self::$throw_on_calculate_totals = null;
         self::$throw_on_get_orders = null;
         self::$on_calculate_totals = null;
+        self::$after_lock_read = null;
         self::$db_options = [];
         self::$sql = [];
     }
@@ -140,7 +142,9 @@ class CF_Test_WPDB {
     public function get_var( $q ) {
         CF_TestState::$sql[] = $q['sql'];
         if ( $q['sql'] === "SELECT option_value FROM {$this->options} WHERE option_name = %s" ) {
-            return CF_TestState::$db_options[ $q['args'][0] ] ?? null;
+            $v = CF_TestState::$db_options[ $q['args'][0] ] ?? null;
+            if ( $f = CF_TestState::$after_lock_read ) { CF_TestState::$after_lock_read = null; $f(); }
+            return $v;
         }
         throw new RuntimeException( "harness: \$wpdb->get_var not modelled: {$q['sql']}" );
     }

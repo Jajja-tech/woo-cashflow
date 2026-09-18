@@ -1,1 +1,5 @@
 .DS_Store
+
+# Editor and deploy settings stay on the machine that uses them. .vscode/sftp.json
+# once published an SSH host, user and key passphrase in this public repo (audit SEC-3).
+.vscode/

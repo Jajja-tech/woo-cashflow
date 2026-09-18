@@ -43,6 +43,15 @@ class CashFlow_Sync_Pull {
     const STATS_OPTION  = 'cashflow_sync_pull_stats';
     const SYNC_KEY_META = 'cashflow_sync_key';
     const POLL_LIMIT    = 3;
+
+    /**
+     * What this plugin can DO, declared on every poll. The backend hands out a
+     * command only for a capability declared in that same poll — never by
+     * comparing version numbers — so a store on an older plugin simply never
+     * receives work it cannot run, and nothing waits on it by accident.
+     * Add a capability here only when the code that runs it ships with it.
+     */
+    const SUPPORTS = [ 'order.create@1' ];
     const INTERVAL      = 60; // seconds
 
     public function __construct() {
@@ -111,8 +120,9 @@ class CashFlow_Sync_Pull {
         // core's Application Passwords eats Basic on custom namespaces;
         // irrelevant outbound, but the convention stands app-wide.
         $res = CashFlow_Plugin::api_request( '/plugin/sync/poll', 'POST', [
-            'version' => CASHFLOW_VERSION,
-            'limit'   => self::POLL_LIMIT,
+            'version'  => CASHFLOW_VERSION,
+            'limit'    => self::POLL_LIMIT,
+            'supports' => self::SUPPORTS,
         ], $secret );
 
         if ( empty( $res['ok'] ) ) {
@@ -148,6 +158,86 @@ class CashFlow_Sync_Pull {
                 $result = [ 'outcome' => 'failed', 'error' => 'Apply crashed: ' . $e->getMessage() ];
             }
             $this->ack( $secret, $job, $result );
+        }
+
+        $commands = ( is_array( $res['data'] ) && isset( $res['data']['commands'] ) && is_array( $res['data']['commands'] ) )
+            ? $res['data']['commands']
+            : [];
+
+        foreach ( $commands as $command ) {
+            if ( ! is_array( $command ) || empty( $command['command_id'] ) ) {
+                CashFlow_Plugin::log( 'sync_pull_command', 'order', 0, 'error', 'Skipped a command with no command_id' );
+                continue;
+            }
+            try {
+                $result = $this->run_command( $command );
+            } catch ( Throwable $e ) {
+                $result = [ 'outcome' => 'failed', 'error' => [ 'code' => 'exception', 'message' => 'Command crashed: ' . $e->getMessage() ] ];
+            }
+            $this->ack_command( $secret, $command, $result );
+        }
+    }
+
+    // ── Commands ────────────────────────────────────────────────────
+
+    /**
+     * Run one command. Only a kind AND capability this build declares is run;
+     * anything else is acked `unsupported` — loudly, so a backend that sent
+     * work we never declared learns about it instead of waiting forever.
+     *
+     * @return array { outcome, order?, error?: { code, message } }
+     */
+    private function run_command( array $command ) {
+        $kind       = isset( $command['kind'] ) ? (string) $command['kind'] : '';
+        $capability = isset( $command['capability'] ) ? (string) $command['capability'] : '';
+
+        if ( 'order.create' !== $kind || 'order.create@1' !== $capability || ! in_array( $capability, self::SUPPORTS, true ) ) {
+            return [ 'outcome' => 'unsupported', 'error' => [ 'code' => 'unsupported_command',
+                'message' => sprintf( 'This plugin (v%s) does not run %s / %s.', CASHFLOW_VERSION, $kind ?: '?', $capability ?: '?' ) ] ];
+        }
+
+        $applier = self::get_applier();
+        if ( ! $applier ) {
+            return [ 'outcome' => 'failed', 'error' => [ 'code' => 'applier_unavailable', 'message' => 'WooCommerce REST controllers unavailable' ] ];
+        }
+        return $applier->create( $command );
+    }
+
+    /**
+     * Ack one command. Like the job ack, a failed ack is logged and NOT
+     * retried here: the backend's lease expiry redelivers the command, and
+     * create()'s idempotency lookup answers `already_created` — that is
+     * exactly the case the key exists for.
+     */
+    private function ack_command( $secret, array $command, array $result ) {
+        $outcome = (string) $result['outcome'];
+        $body = [
+            'command_id'      => (string) $command['command_id'],
+            'idempotency_key' => isset( $command['idempotency_key'] ) ? (string) $command['idempotency_key'] : '',
+            'outcome'         => $outcome,
+        ];
+        if ( isset( $result['order'] ) ) { $body['order'] = $result['order']; }
+        if ( isset( $result['error'] ) ) { $body['error'] = $result['error']; }
+
+        $res = CashFlow_Plugin::api_request( '/plugin/commands/ack', 'POST', $body, $secret );
+
+        $wc_id = isset( $result['order']['id'] ) ? (int) $result['order']['id'] : 0;
+        $num   = isset( $command['order']['order_number'] ) ? (string) $command['order']['order_number'] : '';
+        $why   = isset( $result['error']['message'] ) ? (string) $result['error']['message'] : '';
+        self::bump_outcome( $outcome, $why );
+        if ( 'created' === $outcome || 'already_created' === $outcome ) {
+            CashFlow_Plugin::log( 'sync_pull_command', 'order', $wc_id, 'success',
+                ( 'created' === $outcome ? 'Created ' : 'Already created ' ) . $num . ' (command ' . $body['command_id'] . ')' );
+        } else {
+            CashFlow_Plugin::log( 'sync_pull_command', 'order', $wc_id, 'error',
+                $outcome . ' ' . $num . ': ' . ( isset( $result['error']['code'] ) ? $result['error']['code'] . ' — ' : '' ) . $why
+                . ' (command ' . $body['command_id'] . ')' );
+        }
+
+        if ( empty( $res['ok'] ) ) {
+            $fail = self::describe_failure( $res );
+            CashFlow_Plugin::log( 'sync_pull_ack', 'order', $wc_id, 'error', 'Ack failed for command ' . $body['command_id'] . ' (' . $outcome . '): ' . $fail );
+            self::update_stats( [ 'last_error' => 'Ack failed: ' . $fail ] );
         }
     }
 

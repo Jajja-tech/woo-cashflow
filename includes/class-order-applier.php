@@ -160,15 +160,22 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
     ];
 
     /**
-     * Meta keys the plugin writes ITSELF on a created order. The free `meta`
-     * map may not carry them: a map that set cashflow_command_key would break
-     * the idempotency wall, and one that set the money keys would contradict
-     * money_display on the same save.
+     * The ONLY meta keys the free `meta` map may write — an ALLOW-list.
+     *
+     * It was a deny-list of six keys the plugin writes itself, which let the
+     * map write anything else on the order: `_date_paid`, `_transaction_id`,
+     * `_billing_email`, `_order_total`, a gateway's private keys. The map
+     * exists for two things only — WooCommerce's own order-attribution keys
+     * and the preferred courier — so those are all it may name. The plugin's
+     * own keys (cashflow_order_number, cashflow_command_key, the money
+     * display) are therefore refused too, because they are not on the list.
+     *
+     * Attribution is matched on its prefix because WooCommerce defines a
+     * family of them (_wc_order_attribution_source_type, _utm_source,
+     * _utm_medium, _session_entry, …) and grows it between versions.
      */
-    const CREATE_RESERVED_META = [
-        'cashflow_order_number', 'cashflow_command_key', 'cashflow_advance_amount',
-        'cashflow_cod_amount', 'cashflow_payment_status', 'cashflow_sync_key',
-    ];
+    const CREATE_META_ALLOWED_PREFIX = '_wc_order_attribution_';
+    const CREATE_META_ALLOWED_KEYS   = [ '_cashflow_courier_name' ];
 
     const META_ORDER_NUMBER = 'cashflow_order_number';
     const META_COMMAND_KEY  = 'cashflow_command_key';
@@ -449,8 +456,8 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
         if ( isset( $o['meta'] ) ) {
             if ( ! is_array( $o['meta'] ) ) { return [ 'invalid_payload', 'order.meta must be an object.' ]; }
             foreach ( $o['meta'] as $mk => $mv ) {
-                if ( in_array( (string) $mk, self::CREATE_RESERVED_META, true ) ) {
-                    return [ 'unsupported_field', sprintf( 'order.meta.%s is written by the plugin itself and may not be sent.', $mk ) ];
+                if ( ! self::create_meta_key_allowed( (string) $mk ) ) {
+                    return [ 'unsupported_field', sprintf( 'order.meta.%s is not a meta key order.create@1 may write.', $mk ) ];
                 }
                 if ( ! is_scalar( $mv ) && null !== $mv ) {
                     return [ 'invalid_payload', sprintf( 'order.meta.%s must be a plain value.', $mk ) ];
@@ -458,6 +465,17 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
             }
         }
         return null;
+    }
+
+    /** Is $key on the order.create@1 meta allow-list? */
+    private static function create_meta_key_allowed( $key ) {
+        if ( in_array( $key, self::CREATE_META_ALLOWED_KEYS, true ) ) {
+            return true;
+        }
+        // Prefix plus at least one more character, lowercase words only — the
+        // bare prefix, or a key with spaces or capitals smuggled in after it,
+        // is not a WooCommerce attribution field.
+        return 1 === preg_match( '/^' . preg_quote( self::CREATE_META_ALLOWED_PREFIX, '/' ) . '[a-z0-9_]+$/', $key );
     }
 
     /** One order carrying this meta value, across every status incl. trash. */

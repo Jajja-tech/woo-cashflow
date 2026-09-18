@@ -32,7 +32,7 @@ function a_command( array $over = [], array $order_over = [] ): array {
         'shipping_lines'=> [ [ 'method_id' => 'flat_rate', 'method_title' => 'Flat rate', 'total' => '299' ] ],
         'fee_lines'     => [ [ 'name' => 'Discount', 'total' => '-125' ] ],
         'meta'          => [ '_wc_order_attribution_source_type' => 'utm', '_wc_order_attribution_utm_source' => 'facebook',
-                             'cashflow_courier_name' => 'PostEx' ],
+                             '_cashflow_courier_name' => 'PostEx' ],
         'money_display' => [ 'advance_amount' => '500', 'cod_amount' => '2174', 'payment_status' => 'partial' ],
         'expected_total'=> '2674',
     ], $order_over );
@@ -128,7 +128,7 @@ $want = [
     'cashflow_payment_status' => 'partial',
     '_wc_order_attribution_source_type' => 'utm',
     '_wc_order_attribution_utm_source'  => 'facebook',
-    'cashflow_courier_name'   => 'PostEx',
+    '_cashflow_courier_name'  => 'PostEx',
 ];
 $first = $o->saves[0]['meta'] ?? [];
 $final = end( $o->saves )['meta'] ?? [];
@@ -227,6 +227,43 @@ foreach ( $cases as $what => $cmd ) {
         ( $r['outcome'] ?? '' ) === 'rejected' && ( $r['error']['code'] ?? '' ) === 'unsupported_field'
         && count( CF_TestState::$orders ) === 0, json_encode( $r ) );
 }
+
+// ── 5b. META IS AN ALLOW-LIST ────────────────────────────────────────────
+// Only WooCommerce's attribution keys and the preferred courier. Everything
+// else — the money WooCommerce believes, the payment record, the customer's
+// email behind the address fields' back, the plugin's own keys — is refused
+// by name, and nothing is created.
+echo "── the meta map may write only attribution and the courier\n";
+$refused = [ '_date_paid', '_billing_email', '_transaction_id', '_order_total', '_paid_date',
+             'cashflow_command_key', 'cashflow_order_number', 'cashflow_advance_amount', 'cashflow_sync_key',
+             'cashflow_courier_name',               // the old spelling: not what the plugin's admin reads
+             '_date_paid_wc_order_attribution_x',   // the prefix buried INSIDE another key
+             '_wc_order_attribution_',              // the bare prefix
+             '_wc_order_attributionX',              // a look-alike without the separator
+             'wc_order_attribution_source_type',    // missing the leading underscore
+             '_wc_order_attribution_Source Type',   // capitals and a space after the prefix
+             '_WC_ORDER_ATTRIBUTION_SOURCE_TYPE' ];
+foreach ( $refused as $k ) {
+    fresh_store();
+    $r = $applier->create( a_command( [], [ 'meta' => [ $k => 'x' ] ] ) );
+    ok( "meta key \"$k\" → rejected unsupported_field, named, no order",
+        ( $r['outcome'] ?? '' ) === 'rejected' && ( $r['error']['code'] ?? '' ) === 'unsupported_field'
+        && str_contains( $r['error']['message'] ?? '', $k ) && count( CF_TestState::$orders ) === 0, json_encode( $r ) );
+}
+fresh_store();
+$ra = $applier->create( a_command( [], [ 'meta' => [
+    '_wc_order_attribution_source_type'   => 'utm',
+    '_wc_order_attribution_utm_source'    => 'ig',
+    '_wc_order_attribution_utm_medium'    => 'social',
+    '_wc_order_attribution_session_entry' => 'https://1shop.pk/',
+    '_cashflow_courier_name'              => 'Leopards',
+] ] ) );
+$o = created_orders()[0] ?? null;
+ok( 'every attribution key and the courier are accepted and written',
+    ( $ra['outcome'] ?? '' ) === 'created' && $o
+    && $o->get_meta( '_wc_order_attribution_session_entry' ) === 'https://1shop.pk/'
+    && $o->get_meta( '_wc_order_attribution_utm_medium' ) === 'social'
+    && $o->get_meta( '_cashflow_courier_name' ) === 'Leopards', json_encode( $ra ) );
 
 // ── 6. A PRODUCT THE STORE DOES NOT HAVE ──────────────────────────────────
 echo "── an invalid product is rejected, not failed\n";

@@ -39,6 +39,9 @@ class CF_TestState {
     public static array $log = [];           // every CashFlow_Plugin::log()
     public static ?Throwable $throw_on_calculate_totals = null;
     public static ?Throwable $throw_on_get_orders = null;   // a DB error in a lookup
+    public static $on_calculate_totals = null;               // callable: run something mid-create
+    public static array $db_options = [];                    // the options TABLE the lock rows live in
+    public static array $sql = [];                           // every statement $wpdb ran
     public static array $filters = [];       // hook => callbacks registered by add_filter
 
     public static function reset(): void {
@@ -54,6 +57,9 @@ class CF_TestState {
         self::$log = [];
         self::$throw_on_calculate_totals = null;
         self::$throw_on_get_orders = null;
+        self::$on_calculate_totals = null;
+        self::$db_options = [];
+        self::$sql = [];
     }
 }
 
@@ -100,6 +106,47 @@ if ( ! class_exists( 'CashFlow_Plugin' ) ) {
     }
 }
 
+/**
+ * $wpdb — ONLY the four statements the create lock issues, with MySQL's
+ * semantics for each on a table whose option_name is UNIQUE. Anything else
+ * throws: a stub that answered unknown SQL with a plausible number is how a
+ * harness certifies a query that would fail on a real store.
+ */
+class CF_Test_WPDB {
+    public string $options = 'wp_options';
+    public string $prefix  = 'wp_';
+    public function prepare( $sql, ...$args ) {
+        $args = ( count( $args ) === 1 && is_array( $args[0] ) ) ? $args[0] : $args;
+        return [ 'sql' => $sql, 'args' => $args ];
+    }
+    public function query( $q ) {
+        [ $sql, $a ] = [ $q['sql'], $q['args'] ];
+        CF_TestState::$sql[] = $sql;
+        $t = &CF_TestState::$db_options;
+        if ( str_starts_with( $sql, "INSERT IGNORE INTO {$this->options} (option_name, option_value, autoload)" ) ) {
+            if ( array_key_exists( $a[0], $t ) ) return 0;          // duplicate key: ignored, 0 rows
+            $t[ $a[0] ] = $a[1]; return 1;
+        }
+        if ( str_starts_with( $sql, "UPDATE {$this->options} SET option_value = %s WHERE option_name = %s AND option_value = %s" ) ) {
+            if ( ( $t[ $a[1] ] ?? null ) === $a[2] ) { $t[ $a[1] ] = $a[0]; return 1; }
+            return 0;
+        }
+        if ( str_starts_with( $sql, "DELETE FROM {$this->options} WHERE option_name = %s AND option_value = %s" ) ) {
+            if ( ( $t[ $a[0] ] ?? null ) === $a[1] ) { unset( $t[ $a[0] ] ); return 1; }
+            return 0;
+        }
+        throw new RuntimeException( "harness: \$wpdb->query not modelled: $sql" );
+    }
+    public function get_var( $q ) {
+        CF_TestState::$sql[] = $q['sql'];
+        if ( $q['sql'] === "SELECT option_value FROM {$this->options} WHERE option_name = %s" ) {
+            return CF_TestState::$db_options[ $q['args'][0] ] ?? null;
+        }
+        throw new RuntimeException( "harness: \$wpdb->get_var not modelled: {$q['sql']}" );
+    }
+}
+$GLOBALS['wpdb'] = new CF_Test_WPDB();
+
 // ── WooCommerce ──────────────────────────────────────────────────────────
 class WC_Order {
     private array $meta = [];
@@ -135,6 +182,7 @@ class WC_Order {
     public function set_prices_include_tax( $v ) { $this->calls[] = 'set_prices_include_tax'; }
     public function calculate_totals( $tax = true ) {
         $this->calls[] = 'calculate_totals';
+        if ( CF_TestState::$on_calculate_totals ) { ( CF_TestState::$on_calculate_totals )(); }
         if ( CF_TestState::$throw_on_calculate_totals ) { throw CF_TestState::$throw_on_calculate_totals; }
         // Core's calculate_totals ends in $this->save() (abstract-wc-order.php).
         $this->save();
@@ -190,7 +238,7 @@ function wc_get_product( $id ) { return CF_TestState::$products[ (int) $id ] ?? 
 function wc_transaction_query( $type = 'start', $force = false ) {
     CF_TestState::$tx[] = $type;
     if ( 'start' === $type ) {
-        CF_TestState::$tx_snapshot = CF_TestState::$orders;
+        CF_TestState::$tx_snapshot = CF_TestState::$tx_snapshot ?? CF_TestState::$orders;
     } elseif ( 'rollback' === $type ) {
         CF_TestState::$orders = CF_TestState::$tx_snapshot ?? CF_TestState::$orders;
         CF_TestState::$tx_snapshot = null;
@@ -235,7 +283,11 @@ function wc_get_orders( $args = [] ) {
     }
     $status = array_map( fn( $s ) => preg_replace( '/^wc-/', '', (string) $s ), $status );
     $out = [];
-    foreach ( CF_TestState::$orders as $order ) {
+    // READ ISOLATION, as MySQL gives it: another run cannot see an order this
+    // one has saved but not committed. Without this the stub would let a
+    // racing run "find" an order that, on a real store, it could not.
+    $visible = CF_TestState::$tx_snapshot ?? CF_TestState::$orders;
+    foreach ( $visible as $order ) {
         if ( (string) $order->get_meta( $args['meta_key'] ) !== (string) $args['meta_value'] ) continue;
         if ( ! in_array( $order->get_status(), $status, true ) ) continue;
         $out[] = ( ( $args['return'] ?? '' ) === 'ids' ) ? $order->get_id() : $order;

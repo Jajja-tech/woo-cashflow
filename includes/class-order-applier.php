@@ -208,8 +208,30 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
         if ( $bad ) {
             return self::create_result( 'rejected', null, $bad[0], $bad[1] );
         }
-        $o   = $command['order'];
         $key = (string) $command['idempotency_key'];
+
+        // 🔒 ONE RUN PER KEY. The lookup below and the commit are two moments;
+        // without a lock two runs of the same command (a run that stalled past
+        // the backend's lease, and the redelivery) could both find no key and
+        // both create — two WooCommerce orders, stock reduced twice. The lock
+        // is held across lookup, create and commit, and released always.
+        $lock = self::acquire_create_lock( $key );
+        if ( ! is_string( $lock ) ) {
+            // Never create without it. `failed` makes the backend retry; by
+            // then the other run has committed and the lookup answers
+            // already_created, or it has rolled back and this one proceeds.
+            return self::create_result( 'failed', null, 'create_locked', $lock['message'] );
+        }
+        try {
+            return $this->create_locked( $command, $key, $lock );
+        } finally {
+            self::release_create_lock( $key, $lock );
+        }
+    }
+
+    /** create() with the key's lock held. */
+    private function create_locked( array $command, $key, $lock ) {
+        $o   = $command['order'];
         $num = (string) $o['order_number'];
 
         // (1) IDEMPOTENCY — the wall against a duplicate order. Looked up
@@ -314,6 +336,17 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
             // set_paid is NEVER applied: CashFlow owns the money, and
             // payment_complete() would record a payment nobody made.
             $order->save();
+
+            // Still ours? A run that stalled past CREATE_LOCK_STALE_AFTER has
+            // had its lock taken over, and the run that took it may be
+            // creating the same order right now. Refuse to commit rather than
+            // race it: roll back and let the backend's retry find the winner.
+            if ( ! self::still_holds_create_lock( $key, $lock ) ) {
+                wc_transaction_query( 'rollback' );
+                $started = false;
+                return self::create_result( 'failed', null, 'create_lock_lost',
+                    'This create ran so long that another run took over its lock; nothing was saved. The retry will find the other run\'s order.' );
+            }
 
             wc_transaction_query( 'commit' );
             $started = false;
@@ -465,6 +498,91 @@ class CashFlow_Order_Applier extends WC_REST_Orders_Controller {
             }
         }
         return null;
+    }
+
+    // ── The create lock ─────────────────────────────────────────────
+    //
+    // A row in the options table, named for the idempotency key, taken with
+    // `INSERT IGNORE`: the unique index on option_name makes exactly one
+    // concurrent insert succeed, on every MySQL/MariaDB host and across every
+    // connection. Deliberately NOT add_option(): it checks the cache and then
+    // runs INSERT … ON DUPLICATE KEY UPDATE (wp-includes/option.php), which
+    // OVERWRITES an existing row and still returns true — two racing runs
+    // would both believe they hold the lock. Deliberately NOT GET_LOCK(): it
+    // belongs to one database connection, which pooled or multiplexed hosts
+    // do not guarantee from one query to the next, and the SQLite drop-in has
+    // no such function.
+    //
+    // The row's value is "<unix time>:<random token>". The time lets a lock
+    // left by a dead process expire; the token means only its owner can
+    // release it, and a takeover is visible to the run it was taken from.
+
+    /**
+     * Longer than the backend's command lease (300s) by a wide margin: a lock
+     * must outlive any run the backend still considers in flight, or the
+     * redelivery would take it while the first run is still working.
+     */
+    const CREATE_LOCK_STALE_AFTER = 900;
+
+    private static function create_lock_name( $key ) {
+        return 'cashflow_create_lock_' . md5( (string) $key );
+    }
+
+    /** @return string|array The token held, or [ 'message' => why not ]. */
+    private static function acquire_create_lock( $key ) {
+        global $wpdb;
+        $name  = self::create_lock_name( $key );
+        $now   = time();
+        $token = $now . ':' . bin2hex( random_bytes( 8 ) );
+
+        $inserted = $wpdb->query( $wpdb->prepare(
+            "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
+            $name, $token
+        ) );
+        if ( false === $inserted ) {
+            return [ 'message' => 'Could not take the create lock (database error); nothing was created.' ];
+        }
+        if ( 1 === (int) $inserted ) {
+            return $token;
+        }
+
+        // Someone holds it. Take it over only if it is stale, and only by
+        // compare-and-swap on the exact value we read, so two runs finding
+        // the same stale lock cannot both take it.
+        $held = $wpdb->get_var( $wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", $name
+        ) );
+        if ( null === $held ) {
+            return [ 'message' => 'Could not take the create lock (it vanished mid-check); nothing was created.' ];
+        }
+        $held_at = (int) strtok( (string) $held, ':' );
+        if ( $now - $held_at <= self::CREATE_LOCK_STALE_AFTER ) {
+            return [ 'message' => sprintf( 'Another run is creating this order right now (locked %ds ago); nothing was created.', max( 0, $now - $held_at ) ) ];
+        }
+        $taken = $wpdb->query( $wpdb->prepare(
+            "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value = %s",
+            $token, $name, $held
+        ) );
+        if ( 1 === (int) $taken ) {
+            return $token;
+        }
+        return [ 'message' => 'Another run took over the expired create lock first; nothing was created.' ];
+    }
+
+    private static function still_holds_create_lock( $key, $token ) {
+        global $wpdb;
+        return $token === $wpdb->get_var( $wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", self::create_lock_name( $key )
+        ) );
+    }
+
+    /** Deletes the lock only if it is still ours — never a takeover's. */
+    private static function release_create_lock( $key, $token ) {
+        global $wpdb;
+        $wpdb->query( $wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s",
+            self::create_lock_name( $key ), $token
+        ) );
     }
 
     /** Is $key on the order.create@1 meta allow-list? */

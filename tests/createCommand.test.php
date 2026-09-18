@@ -170,6 +170,46 @@ ok( "CashFlow's line price rides", ( $b['line_items'][0]['total'] ?? '' ) === '2
 ok( 'the discount rides as a signed fee line', ( $b['fee_lines'][0]['total'] ?? '' ) === '-125' );
 ok( 'no coupon lines at all', ! array_key_exists( 'coupon_lines', $b ) );
 
+// ── 4b. EVERY FIELD OF @1 REACHES WOOCOMMERCE, VALUE FOR VALUE ────────────
+// A rename sweep (rename each key create_body reads, run the suite) found
+// eighteen reads no test noticed — the customer's name, phone and email, the
+// delivery note, quantity, the whole shipping line. Each value below is
+// distinct, so a read of the wrong key, or no read at all, cannot pass.
+echo "── every field of order.create@1 reaches WooCommerce\n";
+fresh_store();
+$full = a_command( [], [
+    'customer'      => [ 'first_name' => 'Zainab', 'last_name' => 'Irfan', 'phone' => '03211112222', 'email' => 'zainab@example.pk' ],
+    'address'       => [ 'address_1' => 'House 7, Street 3', 'address_2' => 'Near Bangash Hotel', 'city' => 'Hangu',
+                         'state' => 'KP', 'postcode' => '26190', 'country' => 'PK' ],
+    'customer_note' => 'Deliver after 5pm, ring twice',
+    'line_items'    => [ [ 'product_id' => 601, 'variation_id' => 602, 'quantity' => 3, 'subtotal' => '3300', 'total' => '3000' ] ],
+    'shipping_lines'=> [ [ 'method_id' => 'flat_rate:4', 'method_title' => 'Courier delivery', 'total' => '250' ] ],
+    'fee_lines'     => [ [ 'name' => 'Eid discount', 'total' => '-200' ] ],
+] );
+$rf = $applier->create( $full );
+ok( 'the full command creates', ( $rf['outcome'] ?? '' ) === 'created', json_encode( $rf ) );
+$b = CF_TestState::$created[0] ?? [];
+$addr = [ 'address_1' => 'House 7, Street 3', 'address_2' => 'Near Bangash Hotel', 'city' => 'Hangu',
+          'state' => 'KP', 'postcode' => '26190', 'country' => 'PK' ];
+$person = [ 'first_name' => 'Zainab', 'last_name' => 'Irfan', 'phone' => '03211112222' ];
+ok( 'billing carries name, phone, email and every address field, exactly',
+    ( $b['billing'] ?? null ) == $person + $addr + [ 'email' => 'zainab@example.pk' ], json_encode( $b['billing'] ?? null ) );
+ok( 'shipping carries name, phone and every address field, exactly (no email: WooCommerce has no shipping email)',
+    ( $b['shipping'] ?? null ) == $person + $addr, json_encode( $b['shipping'] ?? null ) );
+ok( 'the phone is on billing AND shipping (the courier reads shipping)',
+    ( $b['billing']['phone'] ?? '' ) === '03211112222' && ( $b['shipping']['phone'] ?? '' ) === '03211112222' );
+ok( 'the customer note rides verbatim', ( $b['customer_note'] ?? '' ) === 'Deliver after 5pm, ring twice',
+    json_encode( $b['customer_note'] ?? null ) );
+ok( 'the line carries product, variation, quantity, subtotal and total exactly',
+    ( $b['line_items'] ?? null ) === [ [ 'product_id' => 601, 'quantity' => 3, 'variation_id' => 602, 'subtotal' => '3300', 'total' => '3000' ] ],
+    json_encode( $b['line_items'] ?? null ) );
+ok( 'the shipping line carries method id, title and total exactly',
+    ( $b['shipping_lines'] ?? null ) === [ [ 'method_id' => 'flat_rate:4', 'method_title' => 'Courier delivery', 'total' => '250' ] ],
+    json_encode( $b['shipping_lines'] ?? null ) );
+ok( 'the fee line carries name and signed total exactly',
+    ( $b['fee_lines'] ?? null ) === [ [ 'name' => 'Eid discount', 'total' => '-200' ] ], json_encode( $b['fee_lines'] ?? null ) );
+ok( 'currency and payment method ride', ( $b['currency'] ?? '' ) === 'PKR' && ( $b['payment_method'] ?? '' ) === 'cod' );
+
 // ── 5. OUTSIDE @1 IS REFUSED ─────────────────────────────────────────────
 echo "── anything outside order.create@1 is refused\n";
 $cases = [

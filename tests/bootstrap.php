@@ -38,6 +38,7 @@ class CF_TestState {
     public static array $api_responses = []; // endpoint => queue of scripted responses
     public static array $log = [];           // every CashFlow_Plugin::log()
     public static ?Throwable $throw_on_calculate_totals = null;
+    public static ?Throwable $throw_on_get_orders = null;   // a DB error in a lookup
     public static array $filters = [];       // hook => callbacks registered by add_filter
 
     public static function reset(): void {
@@ -52,6 +53,7 @@ class CF_TestState {
         self::$api_responses = [];
         self::$log = [];
         self::$throw_on_calculate_totals = null;
+        self::$throw_on_get_orders = null;
     }
 }
 
@@ -222,6 +224,7 @@ function wc_get_orders( $args = [] ) {
     if ( ! isset( $args['meta_key'], $args['meta_value'] ) ) {
         throw new RuntimeException( 'harness: wc_get_orders called without meta_key/meta_value — not modelled' );
     }
+    if ( CF_TestState::$throw_on_get_orders ) { throw CF_TestState::$throw_on_get_orders; }
     // Status, as core resolves it (OrdersTableQuery::process_status): absent or
     // 'any' means every registered status EXCEPT the exclude_from_search ones —
     // which includes TRASH. An explicit list is honoured as given.

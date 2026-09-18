@@ -124,6 +124,19 @@ $acks = calls_to( '/plugin/commands/ack' );
 ok( 'a crash is acked failed, with the reason', ( $acks[0]['body']['outcome'] ?? '' ) === 'failed'
     && str_contains( $acks[0]['body']['error']['message'] ?? '', 'lock wait timeout' ), json_encode( $acks[0]['body'] ?? null ) );
 
+// A failure OUTSIDE create()'s own transaction (the idempotency lookup hits a
+// database error) must still be acked, and must not stop the next command.
+connected_store();
+poll_with( [ 'commands' => [ create_command( 'k5' ), create_command( 'k6', '1SH-C9' ) ] ] );
+ack_ok( 2 );
+CF_TestState::$throw_on_get_orders = new RuntimeException( 'MySQL server has gone away' );
+$pull->tick();
+$acks = calls_to( '/plugin/commands/ack' );
+ok( 'a crash before the transaction is still acked failed',
+    ( $acks[0]['body']['outcome'] ?? '' ) === 'failed'
+    && str_contains( $acks[0]['body']['error']['message'] ?? '', 'gone away' ), json_encode( $acks[0]['body'] ?? null ) );
+ok( 'and the next command is still processed and acked', count( $acks ) === 2, count( $acks ) . ' acks' );
+
 echo "── a command with no id cannot be acked, so it is logged\n";
 connected_store();
 poll_with( [ 'commands' => [ [ 'kind' => 'order.create' ] ] ] );

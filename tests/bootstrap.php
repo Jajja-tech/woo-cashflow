@@ -100,6 +100,8 @@ function delete_option( $k ) { unset( CF_TestState::$options[ $k ] ); return tru
  * here outright, so code that forgets to guard it fails in the harness.
  */
 function get_terms( $args = [] ) {
+    $unmodelled = array_diff( array_keys( (array) $args ), [ 'taxonomy', 'include', 'hide_empty', 'orderby' ] );
+    if ( $unmodelled ) { throw new RuntimeException( 'harness: get_terms argument not modelled: ' . implode( ', ', $unmodelled ) ); }
     if ( null !== CF_TestState::$terms_error ) { return new WP_Error( 'db_error', CF_TestState::$terms_error ); }
     $include = array_map( 'intval', (array) ( $args['include'] ?? [] ) );
     if ( ! $include ) { throw new RuntimeException( 'harness: get_terms without include returns every term in core — not modelled' ); }

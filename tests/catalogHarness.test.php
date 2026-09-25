@@ -54,6 +54,9 @@ $threw = false;
 try { get_terms( [ 'taxonomy' => 'product_cat', 'include' => [], 'hide_empty' => false ] ); } catch ( RuntimeException $e ) { $threw = true; }
 ok( 'an empty include is refused (core would return EVERY term)', $threw );
 CF_TestState::$terms_error = 'Deadlock found';
+$threw = false;
+try { get_terms( [ 'taxonomy' => 'product_cat', 'include' => [ 92 ], 'hide_empty' => false, 'number' => 5 ] ); } catch ( RuntimeException $e ) { $threw = true; }
+ok( 'an argument the stand-in does not model throws, never a plausible answer', $threw );
 ok( 'a read failure is a WP_Error', is_wp_error( get_terms( [ 'taxonomy' => 'product_cat', 'include' => [ 92 ], 'hide_empty' => false ] ) ) );
 CF_TestState::$terms_error = null;
 

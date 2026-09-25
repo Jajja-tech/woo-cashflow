@@ -393,6 +393,9 @@ class CashFlow_Catalog {
             $fn();
         } catch ( Throwable $e ) {
             error_log( '[CashFlow Sync] Catalogue hook failed: ' . $e->getMessage() );
+            // Shown on the panel too (Golden Rule #6), guarded again: recording
+            // the failure must not be what breaks the save.
+            try { self::note_error( 'A product change could not be queued: ' . $e->getMessage() ); } catch ( Throwable $ignored ) {}
         }
     }
 

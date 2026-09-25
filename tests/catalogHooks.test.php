@@ -101,5 +101,7 @@ try { CashFlow_Catalog::on_post_id( 100 ); CashFlow_Catalog::on_before_delete( 1
 catch ( Throwable $e ) { $threw = true; }
 $GLOBALS['wpdb'] = $real;
 ok( 'an exception inside a handler is swallowed and logged, never thrown', ! $threw );
+ok( 'and it reaches the status panel, not only the PHP log',
+    str_contains( (string) ( CashFlow_Catalog::stats()['last_error'] ?? '' ), 'MySQL server has gone away' ) );
 
 summary();

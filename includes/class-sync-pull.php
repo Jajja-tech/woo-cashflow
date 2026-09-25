@@ -51,7 +51,12 @@ class CashFlow_Sync_Pull {
      * receives work it cannot run, and nothing waits on it by accident.
      * Add a capability here only when the code that runs it ships with it.
      */
-    const SUPPORTS = [ 'order.create@1' ];
+    // catalog.push@1: this plugin pushes its own products to CashFlow's catalogue routes
+    // (CashFlow_Catalog). Declared here because the poll is where CashFlow
+    // learns what a store can do; the frontend shows "Resend catalogue" only
+    // for a store that has declared it. It is NOT a command capability —
+    // run_command still refuses anything but order.create.
+    const SUPPORTS = [ 'order.create@1', 'catalog.push@1' ];
     const INTERVAL      = 60; // seconds
 
     public function __construct() {

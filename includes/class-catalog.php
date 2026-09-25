@@ -43,6 +43,10 @@ class CashFlow_Catalog {
     const MAX_PRODUCTS   = 25;      // rows per claim, so products AND removals per body stay within the server's 25 / 100
     const MAX_BODY_BYTES = 81920;   // 80 KB, measured on the encoded body; the server's JSON parser takes 100 kB
     const LIST_OPTION    = 'cashflow_catalog_list';
+    const EP_OPEN            = '/plugin/catalog/list/open';
+    const EP_PAGE            = '/plugin/catalog/list/page';
+    const LIST_EVERY_SECONDS = 3600;
+    const MAX_LIST_ROWS      = 1000;
     /**
      * Ids a SPLIT left unsent because the run's budget ran out mid-recursion
      * [CRITICAL, review-3]. Without this, a slow server plus one poisoned
@@ -828,25 +832,71 @@ class CashFlow_Catalog {
         return ( $this->deadline - self::now() ) >= self::MIN_LEFT_TO_START;
     }
 
+    /**
+     * [B2, N3, S9, NB3] The brief's own work() replacement did not carry
+     * drain_solo() forward at all, and returned immediately on ANY real-save
+     * 'stop' — both wrong now that a list exists alongside the queue:
+     *   - drain_solo() [CRITICAL, review-3/4] is still load-bearing (a prior
+     *     run's budget cutoff must drain one product at a time BEFORE any
+     *     batch, or the same timeout repeats forever) and is not
+     *     re-implemented here — kept as step 0, unchanged.
+     *   - a real-save 'stop' must NOT skip the list step: it is a different
+     *     route on the same connection, and an open list must never idle
+     *     out (15 minutes) behind a struggling queue (proven by this task's
+     *     own "real saves still go first" test, which scripts a malformed
+     *     /products reply — a 'stop' — and still expects list/open to be
+     *     tried second). It DOES still stop this tick from claiming any
+     *     FURTHER real-save batch or entering step 3's "everything else"
+     *     loop: repeating an identical refusal buys nothing (matches
+     *     catalogSend/catalogFailures' "one request, then the run ends").
+     */
     private function work( $secret ) {
-        // Ids a PRIOR run's budget cut short, one at a time, before any batch
-        // [CRITICAL, review-3] — never let one of them ride a large batch
-        // again this run, or the same timeout can repeat.
+        // 0. Ids a PRIOR run's budget cut short, one at a time, before any
+        //    batch [CRITICAL, review-3] — never let one of them ride a
+        //    large batch again this run, or the same timeout can repeat.
         if ( 'stop' === $this->drain_solo( $secret ) ) {
             return;
         }
-        // Real saves first [review-2], until none is due or the run must stop.
+        // 1. Real saves first [review-2], until none is due, the run must
+        //    stop for budget, or the products route itself refuses.
+        $real_stopped = false;
         while ( true ) {
             $d = $this->drain( $secret, true );
             if ( 'stop' === $d ) {
-                return;
+                $real_stopped = true;
+                break;
             }
             if ( 'empty' === $d ) {
                 break;
             }
         }
-        // Then everything else.
-        while ( 'sent' === $this->drain( $secret, false ) ) {
+        // 2. One list step, so an open list never idles out (15 minutes)
+        //    behind a long queue. list_step() is a no-op (no request) when
+        //    no list is due, so this never adds a call on an ordinary tick
+        //    where step 1 finished cleanly with nothing further owed.
+        $l = $this->list_step( $secret );
+        if ( 'stop' === $l || $real_stopped ) {
+            return;
+        }
+        // 3. What is left of the budget: the rest of the queue, then more of
+        //    the list. A list step that had nothing to do (or failed) is not
+        //    retried in the same run — a failing open must not be hammered,
+        //    nor its reason overwritten.
+        while ( $this->can_start() ) {
+            $d = $this->drain( $secret, false );
+            if ( 'stop' === $d ) {
+                return;
+            }
+            if ( 'sent' === $d ) {
+                continue;
+            }
+            if ( 'idle' === $l ) {
+                return;
+            }
+            $l = $this->list_step( $secret );
+            if ( 'stop' === $l || 'idle' === $l ) {
+                return;
+            }
         }
     }
 
@@ -1062,6 +1112,29 @@ class CashFlow_Catalog {
         return true;
     }
 
+    /**
+     * The list/open equivalent of has_shape() [override #2]. A 2xx from
+     * that route counts as success only when it carries one of the wire's
+     * two answers: a list to work from (list_id, after_id, page_size — as
+     * the contract names them) or later. Unlike has_shape() the values here
+     * are scalars, not arrays, so this is not folded into has_shape() itself
+     * — but classify() still decides ok/not-ok from THIS, never a second
+     * status table. retry_after_seconds is deliberately not required: the
+     * wire always sends it alongside later, and open_list() defaults it if
+     * a future reply ever omits it — later alone is proof enough this is
+     * the "wait" answer.
+     */
+    public static function has_open_shape( $data ) {
+        if ( ! is_array( $data ) ) {
+            return false;
+        }
+        if ( isset( $data['later'] ) ) {
+            return true;
+        }
+        return isset( $data['list_id'] ) && is_string( $data['list_id'] ) && '' !== $data['list_id']
+            && array_key_exists( 'after_id', $data ) && array_key_exists( 'page_size', $data );
+    }
+
     /** One of the three codes the wire promises means a 500 is the server's OWN fault [IMPORTANT 1]. */
     private static function is_catalogue_fault( array $res ) {
         $data  = is_array( $res['data'] ?? null ) ? $res['data'] : [];
@@ -1114,11 +1187,20 @@ class CashFlow_Catalog {
      *               transport failure, anything else (including a 2xx with
      *               the wrong shape): not the rows' fault. End the run,
      *               count no try.
+     *
+     * $is_ok_shape [override #2]: which 2xx bodies count as success — the
+     * products route's default (applied/trashed/unchanged), or list/open's
+     * has_open_shape(). The STATUS table below (400/413/500/everything
+     * else) is the ONE table for every catalogue route; only the "was this
+     * 2xx body real" question differs per route, so only that is a parameter.
      */
-    public static function classify( array $res ) {
+    public static function classify( array $res, $is_ok_shape = null ) {
         $code = (int) ( $res['status'] ?? 0 );
+        if ( null === $is_ok_shape ) {
+            $is_ok_shape = function ( $data ) { return self::has_shape( $data, [ 'applied', 'trashed', 'unchanged' ] ); };
+        }
         if ( ! empty( $res['ok'] ) && $code >= 200 && $code < 300 ) {
-            return self::has_shape( $res['data'] ?? null, [ 'applied', 'trashed', 'unchanged' ] ) ? 'ok' : 'stop';
+            return call_user_func( $is_ok_shape, $res['data'] ?? null ) ? 'ok' : 'stop';
         }
         if ( 400 === $code ) {
             return 'malformed';
@@ -1425,6 +1507,98 @@ class CashFlow_Catalog {
 
     private static function save_list_state( array $st ) {
         update_option( self::LIST_OPTION, $st, false );
+    }
+
+    // ── The hourly list [B2, B4, N3, N4, NB3] ───────────────────────
+
+    /** 'idle' (nothing to do now), 'opened', 'page', or 'stop' (end this run). */
+    private function list_step( $secret ) {
+        if ( ! $this->can_start() ) {
+            return 'idle';
+        }
+        $st = self::list_state();
+        if ( empty( $st['list_id'] ) ) {
+            return self::list_due( $st ) ? $this->open_list( $secret, $st ) : 'idle';
+        }
+        return $this->send_page( $secret, $st );
+    }
+
+    /** Once an hour, or at once when the server asked — but never before a "later" has passed. */
+    private static function list_due( array $st ) {
+        $now = self::now();
+        if ( ! empty( $st['retry_at'] ) && $now < (float) $st['retry_at'] ) {
+            return false;
+        }
+        if ( ! empty( $st['wanted'] ) ) {
+            return true;
+        }
+        return empty( $st['last_opened_at'] ) || $now - (float) $st['last_opened_at'] >= self::LIST_EVERY_SECONDS;
+    }
+
+    /**
+     * [override #1, #2, #3, #4] The wire contract is binding for this route:
+     * `later` is answered ONLY for a HEAVY list (this store's first, or one
+     * serving "Resend catalogue"); every `later` is server-recorded; it is
+     * obeyed via retry_after_seconds regardless of why it was given; every
+     * 403/409/429/500 reads exactly as the refusal table in
+     * wire-contract.md. A 2xx counts as success only through
+     * has_open_shape() (never a re-derived check here), via the SAME
+     * classify() the products route uses — one status table, two shape
+     * checks. A refusal goes through the same note_failure() /
+     * describe_connection_refusal() as products, so the panel's wording
+     * matches; a successful 2xx clears a stale refusal exactly as a real
+     * send does.
+     */
+    private function open_list( $secret, array $st ) {
+        global $wpdb;
+        $res   = $this->post( $secret, self::EP_OPEN, self::encode( [ 'site' => self::site() ] ) );
+        $class = self::classify( $res, [ __CLASS__, 'has_open_shape' ] );
+        if ( 'stop' === $class && ! empty( $res['ok'] ) ) {
+            // A 2xx, but neither of the two shapes the wire promises — the
+            // same rule as the products route: never read as "nothing
+            // happened here" (has_open_shape() already ruled out both a
+            // list and a `later`, so this is the one case left).
+            self::note_error( 'Opening the hourly list failed: CashFlow answered without a list id' );
+            return 'idle';
+        }
+        if ( 'ok' !== $class ) {
+            self::note_failure( 'Opening the hourly list', $res );
+            return 'stop' === $class ? 'stop' : 'idle';
+        }
+        self::clear_refusal();
+        $d = is_array( $res['data'] ) ? $res['data'] : [];
+        if ( ! empty( $d['later'] ) ) {
+            // Too many heavy lists open across all stores: the server paces us.
+            $st['retry_at'] = self::now() + max( 60, (int) ( $d['retry_after_seconds'] ?? 600 ) );
+            self::save_list_state( $st );
+            self::update_stats( [ 'last_list' => [ 'result' => 'later', 'at' => self::now_iso() ] ] );
+            return 'idle';
+        }
+        if ( ! empty( $d['resend'] ) && ! self::queue_whole_set_for_resend() ) {
+            // The list is NOT held: the next run opens again, the server hands
+            // back the same open list with resend still set, and this is retried.
+            // Holding it now would let the list complete — and the resend count
+            // as served — with nothing queued.
+            self::note_error( 'The resend could not be queued: ' . $wpdb->last_error );
+            return 'idle';
+        }
+        self::save_list_state( [
+            'list_id'        => (string) $d['list_id'],
+            'after_id'       => max( 0, (int) ( $d['after_id'] ?? 0 ) ),
+            'page_size'      => min( self::MAX_LIST_ROWS, max( 1, (int) ( $d['page_size'] ?? self::MAX_LIST_ROWS ) ) ),
+            'asked'          => 0,
+            'last_opened_at' => self::now(),
+        ] );
+        self::update_stats( [
+            'last_list_opened_at' => self::now_iso(),
+            'last_list_resumed'   => ! empty( $d['resumed'] ),
+            'last_list_resend'    => ! empty( $d['resend'] ),
+        ] );
+        return 'opened';
+    }
+
+    private function send_page( $secret, array $st ) {
+        return 'idle';
     }
 
     // ── The solo list [CRITICAL, review-3] ───────────────────────────

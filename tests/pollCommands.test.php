@@ -59,8 +59,8 @@ $pull->tick();
 $polls = calls_to( '/plugin/sync/poll' );
 ok( 'two ticks made two polls', count( $polls ) === 2, count( $polls ) . ' polls' );
 foreach ( $polls as $i => $p ) {
-    ok( "poll #" . ( $i + 1 ) . " declares supports: ['order.create@1']",
-        ( $p['body']['supports'] ?? null ) === [ 'order.create@1' ], json_encode( $p['body'] ) );
+    ok( "poll #" . ( $i + 1 ) . " declares supports: ['order.create@1', 'catalog.push@1']",
+        ( $p['body']['supports'] ?? null ) === [ 'order.create@1', 'catalog.push@1' ], json_encode( $p['body'] ) );
     ok( "poll #" . ( $i + 1 ) . " still carries version and limit",
         ( $p['body']['version'] ?? null ) === CASHFLOW_VERSION && ( $p['body']['limit'] ?? null ) === 3 );
 }

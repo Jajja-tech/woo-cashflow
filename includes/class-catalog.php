@@ -444,9 +444,10 @@ class CashFlow_Catalog {
             // WP-Cron (never admin) and admin-ajax (always admin), so the
             // SAME product would fingerprint differently depending on which
             // one happened to build it, and the hourly list would resend it
-            // forever for no reason. Force the scheme to the site's own
-            // home_url() scheme instead, independent of the request.
-            $home_scheme = wp_parse_url( home_url(), PHP_URL_SCHEME );
+            // forever for no reason. Force the scheme to the STORED home
+            // option's scheme — not home_url(), which itself switches to https
+            // whenever the current request is SSL.
+            $home_scheme = wp_parse_url( (string) get_option( 'home' ), PHP_URL_SCHEME );
             if ( in_array( $home_scheme, [ 'http', 'https' ], true ) ) {
                 $src = set_url_scheme( $src, $home_scheme );
             }
@@ -564,7 +565,6 @@ class CashFlow_Catalog {
         return $out;
     }
 
-    /** A string of at most $max characters, valid UTF-8, no U+0000. */
     /**
      * A price or weight string over CAP_NUMBER is sent empty, never cut: a cut
      * number is a different number, and the server reads a bad one as empty.
@@ -574,6 +574,7 @@ class CashFlow_Catalog {
         return mb_strlen( $v, 'UTF-8' ) > self::CAP_NUMBER ? '' : $v;
     }
 
+    /** A string of at most $max characters, valid UTF-8, no U+0000. */
     private static function cap( $value, $max ) {
         $s = self::clean( is_scalar( $value ) ? (string) $value : '' );
         return mb_strlen( $s, 'UTF-8' ) > $max ? mb_substr( $s, 0, $max, 'UTF-8' ) : $s;

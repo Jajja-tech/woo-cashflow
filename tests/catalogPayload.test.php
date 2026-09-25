@@ -86,6 +86,7 @@ echo "── the image src is independent of is_ssl()/is_admin() [review, Import
 // independent of the request. A store like 1shop.pk (siteurl http, home
 // https) hits this on every ordinary product.
 shop();
+CF_TestState::$options['home'] = 'https://www.1shop.pk/';   // 1shop.pk's real home option (siteurl is http)
 CF_TestState::$attachments[558] = 'http://1shop.pk/wp-content/uploads/2026/09/y.png';
 CF_TestState::$is_ssl = true;  CF_TestState::$is_admin = false;   // WP-Cron: is_ssl varies, never admin
 $via_cron = CashFlow_Catalog::payload( scarf( [ 'image_id' => 558 ] ) );
@@ -95,8 +96,24 @@ CF_TestState::$is_ssl = false; CF_TestState::$is_admin = false;   // restore
 ok( 'the same image src whichever runner built it', $via_cron['fields']['images'] === $via_ajax['fields']['images'],
     json_encode( [ 'cron' => $via_cron['fields']['images'], 'ajax' => $via_ajax['fields']['images'] ] ) );
 ok( 'and therefore the same fingerprint (no needless resend)', $via_cron['fingerprint'] === $via_ajax['fingerprint'] );
-ok( 'the src takes home_url()\'s scheme, not the request\'s',
+ok( 'the src takes the stored home option\'s scheme, not the request\'s',
     $via_cron['fields']['images'] === [ [ 'src' => 'https://1shop.pk/wp-content/uploads/2026/09/y.png' ] ] );
+
+// Re-review: home_url() is itself request-dependent — core returns https
+// whenever is_ssl() is true, whatever the stored option says. A store whose
+// home option is http must get the same src from both runners too.
+shop();
+CF_TestState::$options['home'] = 'http://plain.test';
+CF_TestState::$attachments[559] = 'http://plain.test/wp-content/uploads/z.png';
+CF_TestState::$is_ssl = true;  CF_TestState::$is_admin = false;
+$cron_http = CashFlow_Catalog::payload( scarf( [ 'image_id' => 559 ] ) );
+CF_TestState::$is_ssl = false; CF_TestState::$is_admin = true;
+$ajax_http = CashFlow_Catalog::payload( scarf( [ 'image_id' => 559 ] ) );
+CF_TestState::$is_ssl = false; CF_TestState::$is_admin = false;
+ok( 'an http home: the same src from both runners', $cron_http['fields']['images'] === $ajax_http['fields']['images'],
+    json_encode( [ 'cron' => $cron_http['fields']['images'], 'ajax' => $ajax_http['fields']['images'] ] ) );
+ok( 'and it is the stored home\'s http', $cron_http['fields']['images'] === [ [ 'src' => 'http://plain.test/wp-content/uploads/z.png' ] ] );
+unset( CF_TestState::$options['home'] );
 
 echo "── a variable parent's own price fields, as WooCommerce reports them [review, Minor]\n";
 shop();

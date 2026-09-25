@@ -195,7 +195,11 @@ function home_url( $path = '', $scheme = null ) {
     if ( '' !== $path || null !== $scheme ) {
         throw new RuntimeException( 'harness: home_url() with a path or scheme argument is not modelled' );
     }
-    return 'https://example.test';
+    // Core (get_home_url): the stored option, switched to https whenever the
+    // CURRENT request is SSL — a fact of the request, which is exactly why the
+    // catalogue must not read its scheme from here.
+    $url = (string) get_option( 'home', 'https://example.test' );
+    return is_ssl() ? set_url_scheme( $url, 'https' ) : $url;
 }
 function wp_parse_url( $u, $c = -1 ) { return parse_url( $u, $c ); }
 function is_ssl() { return CF_TestState::$is_ssl; }
@@ -211,7 +215,9 @@ function set_url_scheme( $url, $scheme = null ) {
     if ( ! in_array( $scheme, [ 'http', 'https' ], true ) ) {
         throw new RuntimeException( 'harness: set_url_scheme() with scheme ' . var_export( $scheme, true ) . ' is not modelled' );
     }
-    return preg_replace( '#^\w+://#', $scheme . '://', trim( (string) $url ) );
+    $url = trim( (string) $url );
+    if ( '//' === substr( $url, 0, 2 ) ) { $url = 'http:' . $url; }   // core: protocol-relative → http: first
+    return preg_replace( '#^\w+://#', $scheme . '://', $url );
 }
 function get_option( $k, $d = false ) { return CF_TestState::$options[ $k ] ?? $d; }
 function update_option( $k, $v ) { CF_TestState::$options[ $k ] = $v; return true; }

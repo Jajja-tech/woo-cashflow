@@ -11,6 +11,7 @@ class CF_Mysqli_WPDB {
     public string $posts   = 'wp_posts';
     public string $options = 'wp_options';
     public string $last_error = '';
+    public $last_query = '';
     private mysqli $db;
 
     public function __construct( mysqli $db ) { $this->db = $db; }
@@ -31,6 +32,7 @@ class CF_Mysqli_WPDB {
 
     private function run( string $sql ) {
         $this->last_error = '';
+        $this->last_query = $sql;
         $r = $this->db->query( $sql );
         if ( false === $r ) { $this->last_error = $this->db->error; }
         return $r;

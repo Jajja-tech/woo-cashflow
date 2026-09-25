@@ -21,7 +21,7 @@ class CF_Test_CatalogDB {
         'claim_real' => 'query', 'claim_any' => 'query', 'claim_listed' => 'query', 'select_claimed' => 'get_results',
         'done' => 'query', 'release_failed' => 'query', 'release_untried' => 'query', 'park' => 'query',
         'clear_parked' => 'query', 'count_pending' => 'get_var', 'count_parked' => 'get_var',
-        'parked_ids' => 'get_col', 'enumerate' => 'get_col', 'exists_listed' => 'get_col',
+        'parked_ids' => 'get_col', 'enumerate' => 'get_col', 'exists_listed' => 'get_col', 'post_of' => 'get_results',
     ];
 
     // The exact text CashFlow_Catalog::sql() must produce, on the table names
@@ -44,6 +44,7 @@ class CF_Test_CatalogDB {
         'count_parked'    => 'SELECT COUNT(*) FROM wp_cashflow_catalog_queue WHERE parked_at IS NOT NULL',
         'parked_ids'      => 'SELECT product_id FROM wp_cashflow_catalog_queue WHERE parked_at IS NOT NULL ORDER BY id ASC LIMIT 20',
         'enumerate'       => "SELECT ID FROM wp_posts WHERE post_type = 'product' AND post_status IN ('publish', 'future', 'draft', 'pending', 'private') AND ID > %d ORDER BY ID ASC LIMIT %d",
+        'post_of'         => 'SELECT ID, post_type, post_status FROM wp_posts WHERE ID = %d',
     ];
 
     // claim_listed and exists_listed both embed {ids} as a literal CSV of
@@ -221,6 +222,12 @@ class CF_Test_CatalogDB {
 
             case 'enumerate':
                 return array_map( 'strval', self::set_ids( (int) $a[0], (int) $a[1] ) );
+
+            case 'post_of':
+                // One wp_posts row, as MySQL returns it (strings), or none.
+                $id = (int) $a[0];
+                if ( ! isset( CF_TestState::$posts[ $id ] ) ) { return []; }
+                return [ [ 'ID' => (string) $id, 'post_type' => CF_TestState::$posts[ $id ]['type'], 'post_status' => CF_TestState::$posts[ $id ]['status'] ] ];
 
             case 'exists_listed':
                 $ids = self::listed_ids( $sql, self::EXISTS_LISTED_PREFIX, self::EXISTS_LISTED_SUFFIX );

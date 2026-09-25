@@ -65,7 +65,7 @@ class CashFlow_Catalog {
     const SQL_NAMES = [
         'show_table', 'insert', 'insert_set', 'claim_real', 'claim_any', 'claim_listed', 'select_claimed', 'done',
         'release_failed', 'release_untried', 'park', 'clear_parked', 'count_pending', 'count_parked',
-        'parked_ids', 'enumerate', 'exists_listed',
+        'parked_ids', 'enumerate', 'exists_listed', 'post_of',
     ];
 
     /** The set [B7]: parents only; these statuses; everything else is outside it. */
@@ -111,7 +111,7 @@ class CashFlow_Catalog {
     /** Injectable clock: a callable returning seconds as a float. Null means the real clock. */
     public static $clock = null;
 
-    /** When this run must stop starting requests by (seconds, from now()). */
+    /** When this run must stop starting requests by (seconds, from now()). Set by run(). */
     private $deadline = 0.0;
 
     /**
@@ -124,11 +124,12 @@ class CashFlow_Catalog {
      * releases untried because of it is ALSO a candidate for the solo list —
      * distinguishing "ran out of time isolating a real refusal" from an
      * ordinary wire-level stop (401/403/…), which releases untried too but
-     * is never a budget problem and must never feed the solo list. A fresh
-     * instance per tick(), so this never leaks between runs.
+     * is never a budget problem and must never feed the solo list. Reset
+     * at the top of every run() [I-2] — not by construction: one instance
+     * can run many times in one PHP process.
      */
     private $budget_exhausted = false;
-    /** Product ids released untried by a budget cutoff this run; see above. */
+    /** Product ids released untried by a budget cutoff this run; see above. Reset by run() [I-2]. */
     private $cut_short_ids = [];
     /**
      * True the moment a product has been sent successfully this run
@@ -139,7 +140,7 @@ class CashFlow_Catalog {
      * review-4] — never deferred to the end of the run: send_split()
      * explores its "first" half before its "second", so waiting for a later
      * sibling to maybe succeed would mean a poisoned product with the lowest
-     * id could never be corroborated at all.
+     * id could never be corroborated at all. Reset by run() [I-2].
      */
     private $any_ok_this_run = false;
     /**
@@ -151,8 +152,8 @@ class CashFlow_Catalog {
      * always the same stale `position_mismatch`) bounce this run in a
      * circle until the budget or the scripted responses run out, hundreds
      * of requests deep. The second and every later conflict this run is
-     * left exactly where it is (no state change) and reported once. A
-     * fresh instance per tick(), like $budget_exhausted.
+     * left exactly where it is (no state change) and reported once. Reset
+     * by run() [I-2], like $budget_exhausted.
      */
     private $conflict_follow_ups = 0;
     /**
@@ -164,7 +165,7 @@ class CashFlow_Catalog {
      * already covers conflicts specifically; this covers everything else).
      * A 409 that WAS followed returns 'page' and never sets this —
      * a reopen after list_expired/list_not_found still happens the same
-     * run, exactly as before. A fresh instance per tick(), like
+     * run, exactly as before. Reset by run() [I-2], like
      * $budget_exhausted.
      */
     private $list_page_failed_this_run = false;
@@ -233,6 +234,10 @@ class CashFlow_Catalog {
             // is parked, a resolved terminal state of its own [review-5]. A
             // plain SELECT: never claims, never mutates.
             'exists_listed'   => 'SELECT DISTINCT product_id FROM {q} WHERE product_id IN ({ids}) AND parked_at IS NULL',
+            // One post, straight from wp_posts [I-1]: what proves a product
+            // is really gone before a removal is sent. wc_get_product()
+            // cannot — it answers false for a failed read too.
+            'post_of'         => 'SELECT ID, post_type, post_status FROM {p} WHERE ID = %d',
         ];
         if ( ! isset( $templates[ $name ] ) ) {
             throw new InvalidArgumentException( 'Unknown catalogue statement: ' . $name );
@@ -507,6 +512,40 @@ class CashFlow_Catalog {
             $prev = $id;
         }
         return $ids;
+    }
+
+    /**
+     * [I-1] Has this id really left the set? true: no post, not a product, or
+     * a status outside SET_STATUSES — a removal is the truth. false: the
+     * product is there. null: the answer is not known (the query failed, or
+     * the connection was not ready and handed back an earlier answer), which
+     * must never be read as gone.
+     *
+     * Why this exists: wc_get_product() answers false both for a product
+     * that does not exist AND for a read that failed (a dropped connection,
+     * a lock wait, a killed query, a call before WooCommerce is ready), and
+     * CashFlow trashes every removal it is sent. So a removal is sent only
+     * when the posts table itself, read directly, says the product is gone.
+     */
+    public static function absent_from_set( $id ) {
+        global $wpdb;
+        $sql  = $wpdb->prepare( self::sql( 'post_of' ), [ (int) $id ] );
+        $rows = $wpdb->get_results( $sql, ARRAY_A );
+        // last_query: core's query() returns at once on a connection that is
+        // not ready (or a query a filter blanked) — no error set, nothing
+        // flushed, and get_results() hands back the PREVIOUS query's rows. An
+        // empty previous answer would otherwise read as "no such post".
+        if ( '' !== (string) $wpdb->last_error || ! is_array( $rows ) || $wpdb->last_query !== $sql || count( $rows ) > 1 ) {
+            return null;
+        }
+        if ( ! $rows ) {
+            return true;
+        }
+        $row = (array) $rows[0];
+        if ( (int) ( $row['ID'] ?? 0 ) !== (int) $id ) {
+            return null;   // not this query's answer
+        }
+        return 'product' !== ( $row['post_type'] ?? '' ) || ! in_array( (string) ( $row['post_status'] ?? '' ), self::SET_STATUSES, true );
     }
 
     public static function count_pending() {
@@ -858,7 +897,19 @@ class CashFlow_Catalog {
             self::note_error( 'The catalogue queue table is missing and could not be created; product changes are not being sent' );
             return;
         }
-        $this->deadline = self::now() + self::BUDGET_SECONDS;
+        // [I-2] Everything "per run" starts fresh HERE, not in the
+        // constructor: production has ONE instance per PHP request, and a
+        // long-lived Action Scheduler runner (`wp action-scheduler run`, a
+        // raised time limit, a busy store's backlog) calls this same object's
+        // tick() more than once. Carried over, these would count outage 500s
+        // as tries, stop following conflicts, stop sending list pages and put
+        // already-sent ids back on the solo list.
+        $this->deadline                  = self::now() + self::BUDGET_SECONDS;
+        $this->budget_exhausted          = false;
+        $this->cut_short_ids             = [];
+        $this->any_ok_this_run           = false;
+        $this->conflict_follow_ups       = 0;
+        $this->list_page_failed_this_run = false;
         self::update_stats( [ 'table_missing' => false, 'last_run_at' => self::now_iso() ] );
         $this->work( $secret );
         // [CRITICAL, review-3/4] Whatever a REFUSED split's budget cutoff
@@ -1095,6 +1146,7 @@ class CashFlow_Catalog {
 
     /** One entry per product id: the product as it is NOW, or a removal if it is gone. */
     private function entries_for( array $rows, $token ) {
+        global $wpdb;
         $by = [];
         foreach ( $rows as $row ) {
             $by[ (int) $row['product_id'] ][] = $row;
@@ -1105,8 +1157,19 @@ class CashFlow_Catalog {
                 $seq     = self::next_seq();             // taken when the product is READ, before it is [NB5]
                 $product = wc_get_product( $id );
                 if ( ! $product ) {
-                    $entries[] = [ 'kind' => 'removed', 'id' => $id, 'rows' => $group, 'body' => [ 'id' => $id, 'sent_seq' => $seq ] ];
-                    continue;
+                    // false is ALSO a failed read [I-1]. Only a product the
+                    // posts table itself proves gone is sent as removed —
+                    // CashFlow trashes every removal. One that is there but
+                    // will not load, or whose absence cannot be proven, is a
+                    // failed try (parked after MAX_ATTEMPTS, on the panel).
+                    $gone = self::absent_from_set( $id );
+                    if ( true === $gone ) {
+                        $entries[] = [ 'kind' => 'removed', 'id' => $id, 'rows' => $group, 'body' => [ 'id' => $id, 'sent_seq' => $seq ] ];
+                        continue;
+                    }
+                    throw new RuntimeException( null === $gone
+                        ? 'it did not load, and whether it still exists could not be checked' . ( '' !== (string) $wpdb->last_error ? ' (' . $wpdb->last_error . ')' : '' )
+                        : 'it exists but did not load' );
                 }
                 // A product that exists is sent as itself, whatever its rows said
                 // (a delete that did not complete leaves a live product).
@@ -1929,7 +1992,14 @@ class CashFlow_Catalog {
         return [ 'rows' => $rows, 'complete' => $complete, 'last_id' => $cursor ];
     }
 
-    /** The fingerprint a send would carry now — the same builder. null if unreadable: the server then asks for it. */
+    /**
+     * The fingerprint a send would carry now — the same builder. null if
+     * unreadable: the server then asks for it, and the ask goes through
+     * entries_for(), which sends a removal only for a product the posts
+     * table proves gone [I-1] — a product that exists but will not load is a
+     * failed try there, never a removal. enumerate() already read this id
+     * from the set, so null here never means "gone".
+     */
     private static function fingerprint_of( $id ) {
         try {
             $product = wc_get_product( $id );

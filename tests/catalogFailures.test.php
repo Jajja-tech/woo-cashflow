@@ -253,6 +253,83 @@ ok( 'no request was made', [] === bodies() );
 ok( 'one try counted against it', '1' === ( row_of( 6001 )['attempts'] ?? null ) );
 ok( 'and the panel says why', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'Product 6001 could not be read' ) );
 
+/** The ids a request carried under `removed`. */
+function removed_sent(): array {
+    $out = [];
+    foreach ( CF_TestState::$api_calls as $c ) {
+        if ( '/plugin/catalog/products' === $c['endpoint'] ) {
+            $out = array_merge( $out, array_column( json_decode( $c['body'], true )['removed'] ?? [], 'id' ) );
+        }
+    }
+    return $out;
+}
+
+echo "── [I-1] a product that is really there but will not load is NEVER sent as removed; it is a failed try\n";
+// wc_get_product() answers false for a missing product AND for a failed read.
+// The posts table, read directly, is what tells them apart.
+store();
+CF_TestState::$posts[6101] = [ 'type' => 'product', 'status' => 'publish', 'parent' => 0 ];   // there, but no product object loads
+CashFlow_Catalog::enqueue( 6101, 'asked' );
+respond( 5, function () { return ok200(); } );
+run_job();
+ok( 'nothing was sent as removed', [] === removed_sent(), json_encode( removed_sent() ) );
+ok( 'no request at all: there was nothing to send', [] === bodies() );
+ok( 'one try counted against it', '1' === ( row_of( 6101 )['attempts'] ?? null ) );
+ok( 'and the panel names it', str_contains( (string) ( CashFlow_Catalog::stats()['last_error'] ?? '' ), 'Product 6101 could not be read' ),
+    (string) ( CashFlow_Catalog::stats()['last_error'] ?? '' ) );
+for ( $run = 2; $run <= 5; $run++ ) { $T += 61; run_job(); }
+ok( 'after its tries it parks — shown on the panel, never trashed', null !== ( row_of( 6101 )['parked_at'] ?? null )
+    && in_array( 6101, CashFlow_Catalog::parked_ids(), true ) );
+ok( 'and in all five runs it was never once sent as removed', [] === removed_sent() );
+
+echo "── [I-1] a product truly gone is still sent as removed\n";
+store();
+CF_TestState::$posts[6103] = [ 'type' => 'product', 'status' => 'trash', 'parent' => 0 ];    // left the set
+CF_TestState::$posts[6104] = [ 'type' => 'product', 'status' => 'auto-draft', 'parent' => 0 ];
+CashFlow_Catalog::enqueue( 6102, 'removed' );                 // no post at all: permanently deleted
+CashFlow_Catalog::enqueue( 6103, 'save' );
+CashFlow_Catalog::enqueue( 6104, 'save' );
+respond( 1, function () { return ok200(); } );
+run_job();
+$gone = removed_sent();
+sort( $gone );
+ok( 'absent, or no longer in the set\'s statuses: removed', $gone === [ 6102, 6103, 6104 ], json_encode( $gone ) );
+ok( 'and their rows are done', CF_TestState::$catalog_queue === [] );
+
+echo "── [I-1] a failed direct query is never a removal\n";
+store();
+CashFlow_Catalog::enqueue( 6105, 'removed' );                 // no post: WOULD be removed if the query could be believed
+CF_TestState::$db_error_on = 'SELECT ID, post_type, post_status FROM wp_posts';
+respond( 1, function () { return ok200(); } );
+run_job();
+CF_TestState::$db_error_on = null;
+ok( 'nothing was sent as removed', [] === removed_sent() );
+ok( 'a try is counted instead', '1' === ( row_of( 6105 )['attempts'] ?? null ) );
+ok( 'and the panel names it', str_contains( (string) ( CashFlow_Catalog::stats()['last_error'] ?? '' ), 'Product 6105 could not be read' ),
+    (string) ( CashFlow_Catalog::stats()['last_error'] ?? '' ) );
+
+echo "── [I-1] a connection that was not ready (the previous query's answer, no error) is never a removal\n";
+// Core's query() returns at once when the connection is not ready: nothing is
+// flushed, last_error stays empty, and get_results() hands back the PREVIOUS
+// query's result — here, nothing. Only last_query can tell.
+store();
+CashFlow_Catalog::enqueue( 6106, 'removed' );
+$real_wpdb = $GLOBALS['wpdb'];
+$GLOBALS['wpdb'] = new class extends CF_Test_WPDB {
+    public function get_results( $q, $output = 'OBJECT' ) {
+        $sql = is_array( $q ) ? $q['sql'] : (string) $q;
+        if ( 'post_of' === CF_Test_CatalogDB::name_of( $sql ) ) {
+            return [];   // not ready: last_query is left as it was
+        }
+        return parent::get_results( $q, $output );
+    }
+};
+respond( 1, function () { return ok200(); } );
+run_job();
+$GLOBALS['wpdb'] = $real_wpdb;
+ok( 'nothing was sent as removed', [] === removed_sent() );
+ok( 'a try is counted instead', '1' === ( row_of( 6106 )['attempts'] ?? null ) );
+
 echo "── the budget runs out mid-split: the unsent half is untouched\n";
 store();
 saves( [ 7001, 7002, 7003, 7004 ] );

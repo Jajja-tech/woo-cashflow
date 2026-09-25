@@ -125,6 +125,15 @@ function cf_queue_scenarios( array $env ): void {
     ok( 'after 10', CashFlow_Catalog::enumerate( 10, 10 ) === [ 13, 14 ] );
     ok( 'past the end: an empty list, which is NOT an error', CashFlow_Catalog::enumerate( 14, 10 ) === [] );
 
+    echo "── [I-1] whether a product has really left the set is read from wp_posts directly\n";
+    ok( 'a published product is there', CashFlow_Catalog::absent_from_set( 10 ) === false );
+    ok( 'a draft and a private product are there', CashFlow_Catalog::absent_from_set( 13 ) === false && CashFlow_Catalog::absent_from_set( 14 ) === false );
+    ok( 'a trashed product has left the set', CashFlow_Catalog::absent_from_set( 11 ) === true );
+    ok( 'an auto-draft is outside the set', CashFlow_Catalog::absent_from_set( 15 ) === true );
+    ok( 'a variation is not a product of the set', CashFlow_Catalog::absent_from_set( 12 ) === true );
+    ok( 'a post that is not a product is not in the set', CashFlow_Catalog::absent_from_set( 16 ) === true );
+    ok( 'an id with no post at all is gone', CashFlow_Catalog::absent_from_set( 999 ) === true );
+
     echo "── claim_listed() takes exactly the listed ids, ANY reason, one at a time, oldest first [CRITICAL, review-4]\n";
     $env['reset']();
     CashFlow_Catalog::enqueue( 1, 'asked' );      // listed, and the oldest of the listed rows

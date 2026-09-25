@@ -279,6 +279,11 @@ class CF_Test_WPDB {
     public string $prefix  = 'wp_';
     public string $posts   = 'wp_posts';
     public string $last_error = '';
+    // Like core: the query as last handed to the database. Core sets it only
+    // once a query really runs — a connection that is not ready leaves the
+    // previous one here, which is how a caller can tell [I-1]. Here it is the
+    // prepared value itself (prepare() returns [sql, args]).
+    public $last_query = '';
     public function get_charset_collate() { return 'DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci'; }
     public function prepare( $sql, ...$args ) {
         $args = ( count( $args ) === 1 && is_array( $args[0] ) ) ? $args[0] : $args;
@@ -289,6 +294,7 @@ class CF_Test_WPDB {
     }
     public function query( $q ) {
         $this->last_error = '';
+        $this->last_query = $q;
         [ $sql, $a ] = self::split( $q );
         if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'query', $name, $a, $this, $sql ); }
         CF_TestState::$sql[] = $sql;
@@ -309,6 +315,7 @@ class CF_Test_WPDB {
     }
     public function get_var( $q ) {
         $this->last_error = '';
+        $this->last_query = $q;
         [ $sql, $a ] = self::split( $q );
         if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_var', $name, $a, $this, $sql ); }
         CF_TestState::$sql[] = $sql;
@@ -321,12 +328,14 @@ class CF_Test_WPDB {
     }
     public function get_col( $q ) {
         $this->last_error = '';
+        $this->last_query = $q;
         [ $sql, $a ] = self::split( $q );
         if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_col', $name, $a, $this, $sql ); }
         throw new RuntimeException( "harness: \$wpdb->get_col not modelled: $sql" );
     }
     public function get_results( $q, $output = 'OBJECT' ) {
         $this->last_error = '';
+        $this->last_query = $q;
         [ $sql, $a ] = self::split( $q );
         if ( ARRAY_A !== $output ) { throw new RuntimeException( 'harness: get_results is modelled for ARRAY_A only' ); }
         if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_results', $name, $a, $this, $sql ); }

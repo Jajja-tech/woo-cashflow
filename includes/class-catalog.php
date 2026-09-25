@@ -43,6 +43,14 @@ class CashFlow_Catalog {
 
     const STATS_OPTION = 'cashflow_catalog_stats';
 
+    /** Hooks that pass a post id. [B5] A category or tag rename is deliberately NOT hooked [review-2]. */
+    const HOOKS_POST_ID = [
+        'save_post_product', 'woocommerce_new_product', 'woocommerce_update_product',
+        'woocommerce_update_product_variation', 'trashed_post', 'untrashed_post',
+    ];
+    /** Hooks that pass a product object. */
+    const HOOKS_PRODUCT = [ 'woocommerce_product_set_stock', 'woocommerce_variation_set_stock' ];
+
     /** Injectable clock: a callable returning seconds as a float. Null means the real clock. */
     public static $clock = null;
 
@@ -51,6 +59,7 @@ class CashFlow_Catalog {
         // UPDATE never fires the activation hook, so this is where the table is
         // created: on the first request of each site that runs this version. [NB1]
         self::maybe_upgrade();
+        self::register_hooks();
     }
 
     public static function now() {
@@ -319,6 +328,72 @@ class CashFlow_Catalog {
     public static function parked_ids() {
         global $wpdb;
         return array_map( 'intval', (array) $wpdb->get_col( self::sql( 'parked_ids' ) ) );
+    }
+
+    // ── Hooks: one cheap INSERT IGNORE, never anything that can break a save ──
+
+    public static function register_hooks() {
+        foreach ( self::HOOKS_POST_ID as $hook ) {
+            add_action( $hook, [ __CLASS__, 'on_post_id' ], 10, 1 );
+        }
+        foreach ( self::HOOKS_PRODUCT as $hook ) {
+            add_action( $hook, [ __CLASS__, 'on_product_object' ], 10, 1 );
+        }
+        // Fires while the post still exists, so its type and parent can be read. [B5]
+        add_action( 'before_delete_post', [ __CLASS__, 'on_before_delete' ], 10, 1 );
+    }
+
+    public static function on_post_id( $post_id ) {
+        self::guard( function () use ( $post_id ) { self::mark( $post_id, 'save' ); } );
+    }
+
+    public static function on_product_object( $product ) {
+        self::guard( function () use ( $product ) {
+            if ( is_object( $product ) && is_callable( [ $product, 'get_id' ] ) ) {
+                self::mark( $product->get_id(), 'save' );
+            }
+        } );
+    }
+
+    public static function on_before_delete( $post_id ) {
+        self::guard( function () use ( $post_id ) { self::mark( $post_id, 'removed' ); } );
+    }
+
+    /**
+     * A product queues itself. A variation queues its PARENT as a save — a
+     * variation change (or delete) changes the parent's payload, never removes
+     * the parent. Anything else (orders, pages, revisions, unknown ids) is
+     * ignored: the set is parents only [B7].
+     */
+    private static function mark( $post_id, $reason ) {
+        $id = is_numeric( $post_id ) ? (int) $post_id : 0;
+        if ( $id <= 0 ) {
+            return;
+        }
+        $type = get_post_type( $id );
+        if ( 'product' === $type ) {
+            $target = $id;
+        } elseif ( 'product_variation' === $type ) {
+            $target = (int) wp_get_post_parent_id( $id );
+            $reason = 'save';
+            if ( $target <= 0 ) {
+                return;
+            }
+        } else {
+            return;
+        }
+        if ( ! self::enqueue( $target, $reason ) ) {
+            self::note_error( 'Product ' . $target . ' could not be queued for CashFlow; the hourly list will catch it' );
+        }
+    }
+
+    /** A hook runs inside an admin save. Nothing here may ever break it. */
+    private static function guard( callable $fn ) {
+        try {
+            $fn();
+        } catch ( Throwable $e ) {
+            error_log( '[CashFlow Sync] Catalogue hook failed: ' . $e->getMessage() );
+        }
     }
 
     // ── Stats: a bounded option the status panel reads ──────────────

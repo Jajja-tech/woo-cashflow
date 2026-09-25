@@ -163,12 +163,19 @@ CF_TestState::$terms_error = null;
 ok( 'its row carries null', ( pages()[0]['rows'][1] ?? null ) === [ 13, null ] );
 
 echo "── a failed page keeps the list where it was\n";
+// Since a list ALREADY open gets the run's very first turn [task-12,
+// IMPORTANT 1], AND the ordinary hourly list_step() still runs afterwards
+// (unchanged — "then the rest as now"), an already-open list that keeps
+// failing gets tried TWICE this run (step -1, then step 2) before step 3's
+// own `idle` guard stops it going a third time. Both attempts fail the
+// same way; scripted identically so the outcome does not depend on which
+// attempt "wins".
 store();
-page_answers( 1, function () { return [ 'ok' => false, 'status' => 500, 'data' => [ 'error' => 'catalogue_list_failed' ] ]; } );
+page_answers( 2, function () { return [ 'ok' => false, 'status' => 500, 'data' => [ 'error' => 'catalogue_list_failed' ] ]; } );
 run_job();
 ok( 'still held at 0, reason on the panel', ( CashFlow_Catalog::list_state()['after_id'] ?? null ) === 0
     && str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'Sending a list page failed: HTTP 500: catalogue_list_failed' ) );
-ok( 'and no second request was made to the route that just refused', count( pages() ) === 1 );
+ok( 'bounded at exactly two attempts this run — step -1 and step 2, never a third', count( pages() ) === 2 );
 
 echo "── a real refusal on the list route ends the run — no second request anywhere [task-12]\n";
 store();
@@ -178,7 +185,103 @@ ok( '401 on list/page: the run stops on the spot', count( pages() ) === 1 && tru
 ok( 'the list is left exactly where it was', ( CashFlow_Catalog::list_state()['list_id'] ?? '' ) === LIST_ID
     && ( CashFlow_Catalog::list_state()['after_id'] ?? null ) === 0 );
 
-echo "── a long real-save queue does not starve an open list [task-12, new requirement]\n";
+echo "── at most one conflict is followed per run — a repeating refusal costs a HANDFUL of requests, not hundreds [task-12, IMPORTANT 2]\n";
+store();
+for ( $i = 0; $i < 50; $i++ ) {
+    page_answers( 1, function () { return conflict( [ 'error' => 'list_not_found' ] ); } );
+    CF_TestState::$api_responses['/plugin/catalog/list/open'][] = [ 'ok' => true, 'status' => 200, 'data' => [ 'list_id' => LIST_ID2, 'after_id' => 0, 'resend' => false, 'resumed' => false, 'page_size' => 1000 ] ];
+}
+run_job();
+$page_calls = count( array_filter( CF_TestState::$api_calls, function ( $c ) { return '/plugin/catalog/list/page' === $c['endpoint']; } ) );
+$open_calls = count( array_filter( CF_TestState::$api_calls, function ( $c ) { return '/plugin/catalog/list/open' === $c['endpoint']; } ) );
+ok( 'a server refusing every page as list_not_found still costs a handful of requests, not dozens (50 were available)',
+    $page_calls + $open_calls <= 5, "page=$page_calls open=$open_calls" );
+
+store();
+for ( $i = 0; $i < 50; $i++ ) {
+    page_answers( 1, function () { return conflict( [ 'error' => 'position_mismatch', 'expected_after_id' => 5 ] ); } );
+}
+run_job();
+ok( 'the same, for a repeating position_mismatch (50 were available)', count( pages() ) <= 5, (string) count( pages() ) );
+
+echo "── send_page clamps page_size to 1-1000, exactly as open_list does [task-12, minor 1]\n";
+// A SET past 1,000 ids AND a stale page_size past MAX_LIST_ROWS — so an
+// unclamped page_size would genuinely be able to return more than 1,000
+// rows in one page (a smaller SET would hide the missing clamp, since the
+// SET itself would run out first regardless of page_size).
+store( range( 1, 1200 ), 5000 );
+page_answers( 1, follow() );
+run_job();
+ok( 'the page is capped at exactly MAX_LIST_ROWS even though the stored page_size and the SET both exceed it',
+    count( pages()[0]['rows'] ?? [] ) === CashFlow_Catalog::MAX_LIST_ROWS, (string) count( pages()[0]['rows'] ?? [] ) );
+
+store();
+CF_TestState::$options['cashflow_catalog_list']['page_size'] = 0;   // would make build_page()'s own loop never run at all
+page_answers( 1, follow() );
+run_job();
+ok( 'a page_size of 0 is floored to 1, not left to stall the list forever', ( pages()[0]['rows'] ?? null ) !== [] );
+
+echo "── a page built and then dropped for want of time is noted, never silent [task-12, minor 2]\n";
+store( [ 601 ] );   // one product; reading it alone costs more than the run can spare
+CF_TestState::$on_product_get = function ( $prop ) { global $T; if ( 'name' === $prop ) { $T += 14; } };
+run_job();
+CF_TestState::$on_product_get = null;
+ok( 'no page was sent — there was no time left this run to send what was built', pages() === [] );
+ok( 'the panel says so, never silently', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'no time left this run to send it' ) );
+
+echo "── a 2xx with the wrong shape on list/page says so plainly, like open_list()'s own message [task-12, minor 3]\n";
+store();
+page_answers( 2, function () { return [ 'ok' => true, 'status' => 200, 'data' => [ 'unexpected' => true ] ]; } );
+run_job();
+ok( 'worded the same way open_list() words its own missing-shape failure',
+    str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'Sending a list page failed: CashFlow answered without a page result' ) );
+
+echo "── a need id that fails to enqueue is counted and shown, not silently dropped [task-12, minor 4]\n";
+store();
+page_answers( 1, function () { return ok_page( [ 'need' => [ 13, 14 ], 'after_id' => 14, 'complete' => true, 'outcome' => 'trashed' ] ); } );
+CF_TestState::$db_error_on = 'INSERT IGNORE INTO wp_cashflow_catalog_queue (product_id, reason, attempts, queued_at, pending_key) VALUES';
+run_job();
+CF_TestState::$db_error_on = null;
+ok( 'the failed enqueues are counted on the panel, not just the raw DB reason',
+    str_contains( (string) CashFlow_Catalog::stats()['last_error'], '2 asked products could not be queued' ) );
+ok( 'nothing was actually queued', CashFlow_Catalog::count_pending() === 0 );
+
+echo "── enumerate() treats a SILENT failure (no last_error) the same as one that sets it [task-12, minor 5]\n";
+CF_TestState::reset();
+CF_TestState::$catalog_tables['wp_cashflow_catalog_queue'] = true;
+CF_TestState::$db_silent_failure_on = 'enumerate';
+$silent = CashFlow_Catalog::enumerate( 0, 100 );
+CF_TestState::$db_silent_failure_on = null;
+ok( 'a get_col that signals failure with no last_error still answers null, not []', $silent === null );
+
+echo "── a DB error on a LATER chunk discards the WHOLE page, not just what failed [task-12, minor 6]\n";
+store( range( 301, 520 ), 1000 );   // 220 ids: needs more than one ENUM_CHUNK to enumerate
+CF_TestState::$stmt_fail_from_call['enumerate'] = 2;   // the first chunk succeeds; the second (and any later) fails
+run_job();
+CF_TestState::$stmt_fail_from_call = [];
+ok( 'no page was sent — the successfully-read first chunk was discarded too, never sent alone', pages() === [] );
+ok( 'the list is left exactly where it was', ( CashFlow_Catalog::list_state()['after_id'] ?? null ) === 0 );
+ok( 'the panel says why', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'product query failed' ) );
+
+echo "── a 409 with an error the contract does not name still drops the list safely — never stuck, never a crash [task-12, minor 6]\n";
+store();
+page_answers( 1, function () { return conflict( [ 'error' => 'something_the_plugin_has_never_seen' ] ); } );
+CF_TestState::$api_responses['/plugin/catalog/list/open'][] = [ 'ok' => true, 'status' => 200, 'data' => [ 'list_id' => LIST_ID2, 'after_id' => 0, 'resend' => false, 'resumed' => false, 'page_size' => 1000 ] ];
+page_answers( 1, follow() );
+run_job();
+ok( 'an unrecognised 409 reason is treated like any other conflict — a fresh list opens and pages, safely',
+    ( pages()[1]['list_id'] ?? '' ) === LIST_ID2 );
+
+echo "── position_mismatch with no usable expected_after_id falls back to opening fresh, never a guess [task-12, minor 6]\n";
+store();
+page_answers( 1, function () { return conflict( [ 'error' => 'position_mismatch' ] ); } );   // no expected_after_id at all
+CF_TestState::$api_responses['/plugin/catalog/list/open'][] = [ 'ok' => true, 'status' => 200, 'data' => [ 'list_id' => LIST_ID2, 'after_id' => 0, 'resend' => false, 'resumed' => false, 'page_size' => 1000 ] ];
+page_answers( 1, follow() );
+run_job();
+ok( 'no usable position — falls back to opening fresh rather than guessing one',
+    ( pages()[1]['list_id'] ?? '' ) === LIST_ID2 );
+
+echo "── a long real-save queue does not starve an open list [task-12, IMPORTANT 1 — ordering, not a threshold]\n";
 store( range( 201, 217 ), 5 );
 for ( $id = 1001; $id <= 1200; $id++ ) {
     CashFlow_Catalog::enqueue( $id, 'save' );   // 200 real saves — a bulk edit
@@ -195,24 +298,60 @@ for ( $i = 0; $i < 10; $i++ ) {
 page_answers( 6, follow() );
 
 run_job();
-ok( 'tick 1: the real-save phase does NOT drain to exhaustion — it yields with the reserve still in hand',
-    CashFlow_Catalog::count_pending() === 125, (string) CashFlow_Catalog::count_pending() );
-ok( 'tick 1: the list still gets its page — one, not zero, despite 200 real saves being due',
+ok( 'tick 1: the list gets the run\'s very FIRST turn — one page, not zero, despite 200 real saves being due',
     count( pages() ) === 1 );
+ok( 'tick 1: real saves still drain, going first does not stop them',
+    CashFlow_Catalog::count_pending() === 125, (string) CashFlow_Catalog::count_pending() );
 ok( 'tick 1: the list advanced past its very first row and is still open (not force-completed, not expired)',
     ( CashFlow_Catalog::list_state()['after_id'] ?? null ) === 205 && ! empty( CashFlow_Catalog::list_state()['list_id'] ) );
 
 run_job();
-ok( 'tick 2: real saves are STILL draining — the reserve does not stall them either',
-    CashFlow_Catalog::count_pending() === 50, (string) CashFlow_Catalog::count_pending() );
-ok( 'tick 2: the list advanced again — it is never skipped while the backlog exists',
+ok( 'tick 2: the list gets first turn again — it is never skipped while the backlog exists',
     count( pages() ) === 2 && ( CashFlow_Catalog::list_state()['after_id'] ?? null ) === 210 );
+ok( 'tick 2: real saves are STILL draining',
+    CashFlow_Catalog::count_pending() === 50, (string) CashFlow_Catalog::count_pending() );
 
 run_job();
 ok( 'tick 3: the whole real-save backlog is gone — nothing was starved for good, only delayed',
     CashFlow_Catalog::count_pending() === 0, (string) CashFlow_Catalog::count_pending() );
 ok( 'tick 3: the list reaches its own end — every id in the set was still reached',
     empty( CashFlow_Catalog::list_state()['list_id'] ) && count( pages() ) === 4 );
+
+echo "── the same, at batch costs a fixed reserve could never have covered [task-12, IMPORTANT 1]\n";
+// The reviewer reproduced 0 pages across 3 runs at a 6.5-7s or 13.5s batch
+// cost under the old threshold design — guaranteeing a page after such a
+// batch needs 28s and a run only has 25. Ordering removes the question
+// entirely: the list goes first, before any real-save batch is even
+// claimed, so its own cost can never matter.
+foreach ( [ 5.0, 6.8, 10.0, 13.5 ] as $cost ) {
+    store( range( 701, 712 ), 5 );   // 12-id set, page_size 5 — several pages needed to complete
+    for ( $id = 2001; $id <= 2060; $id++ ) {
+        CashFlow_Catalog::enqueue( $id, 'save' );   // 60 real saves, several batches
+    }
+    $slow = function () use ( $cost ) {
+        global $T;
+        $T += $cost;
+        return [ 'ok' => true, 'status' => 200, 'data' => [ 'applied' => [], 'trashed' => [], 'unchanged' => [], 'warnings' => [], 'list_wanted' => false ] ];
+    };
+    for ( $i = 0; $i < 10; $i++ ) {
+        CF_TestState::$api_responses['/plugin/catalog/products'][] = $slow;
+    }
+    page_answers( 10, follow() );
+
+    run_job();
+    $pages1   = count( pages() );
+    $pending1 = CashFlow_Catalog::count_pending();
+    ok( "batch cost {$cost}s: run 1 sends the list at least one page", $pages1 >= 1, "got $pages1 pages" );
+    ok( "batch cost {$cost}s: run 1 still drains real saves", $pending1 < 60, "pending still $pending1" );
+
+    run_job();
+    $pages2   = count( pages() );
+    $pending2 = CashFlow_Catalog::count_pending();
+    ok( "batch cost {$cost}s: run 2 advances the list further (or it has already finished)",
+        $pages2 > $pages1 || empty( CashFlow_Catalog::list_state()['list_id'] ), "pages stayed at $pages1" );
+    ok( "batch cost {$cost}s: run 2 keeps draining (or is already done)",
+        $pending2 < $pending1 || 0 === $pending1, "pending stuck at $pending1" );
+}
 
 CashFlow_Catalog::$clock = null;
 summary();

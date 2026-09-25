@@ -62,6 +62,9 @@ class CF_TestState {
     public static array $catalog_queue = [];   // the queue TABLE: id => row, values as MySQL returns them (strings / null)
     public static int   $catalog_queue_next = 1;
     public static ?string $db_error_on = null; // a catalogue statement whose SQL contains this fails like MySQL
+    public static ?string $db_silent_failure_on = null; // a catalogue statement NAME that fails with NO $wpdb->last_error set [task-12]
+    public static array $stmt_fail_from_call = []; // statement name => the call NUMBER (1-based) at and after which every call to it fails [task-12]
+    public static array $stmt_call_counts    = []; // internal: statement name => calls seen so far, reset with everything else
     public static array $dbdelta = [];         // every SQL dbDelta was handed
     public static bool  $dbdelta_creates = true;
     public static ?Throwable $dbdelta_throws = null;
@@ -100,6 +103,9 @@ class CF_TestState {
         self::$catalog_queue = [];
         self::$catalog_queue_next = 1;
         self::$db_error_on = null;
+        self::$db_silent_failure_on = null;
+        self::$stmt_fail_from_call = [];
+        self::$stmt_call_counts = [];
         self::$dbdelta = [];
         self::$dbdelta_creates = true;
         self::$dbdelta_throws = null;

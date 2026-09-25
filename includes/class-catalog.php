@@ -50,17 +50,6 @@ class CashFlow_Catalog {
     const PAGE_BUILD_SECONDS = 6;     // a page is as many products as can be read in this long [NB2]
     const ENUM_CHUNK         = 100;   // ids per enumeration query; the object cache is flushed between chunks
     /**
-     * When a list is open, the real-save phase [B2, review, task-12] must
-     * leave at least this much of the run's budget behind before it starts
-     * one more batch — enough for send_page() to both START a request
-     * (MIN_LEFT_TO_START) and actually BUILD something with it
-     * (PAGE_BUILD_SECONDS), not merely be called with a budget of ~0. A
-     * bulk edit that keeps 200 real saves due, run after run, must never
-     * be able to spend the WHOLE budget every single run: an open list
-     * left untouched for long enough idles out on the server (15 minutes).
-     */
-    const LIST_RESERVE_SECONDS = self::PAGE_BUILD_SECONDS + self::MIN_LEFT_TO_START;
-    /**
      * Ids a SPLIT left unsent because the run's budget ran out mid-recursion
      * [CRITICAL, review-3]. Without this, a slow server plus one poisoned
      * product among many restarts the same large split from scratch every
@@ -153,6 +142,19 @@ class CashFlow_Catalog {
      * id could never be corroborated at all.
      */
     private $any_ok_this_run = false;
+    /**
+     * How many 409 conflicts on the list route have been FOLLOWED this run
+     * [task-12, IMPORTANT 2]. At most ONE: a 409 updates the list's local
+     * state (a corrected position, or a cleared list ready to reopen) to
+     * prime exactly one retry — following a SECOND one, whatever route or
+     * cause, would let a server that always answers `list_not_found` (or
+     * always the same stale `position_mismatch`) bounce this run in a
+     * circle until the budget or the scripted responses run out, hundreds
+     * of requests deep. The second and every later conflict this run is
+     * left exactly where it is (no state change) and reported once. A
+     * fresh instance per tick(), like $budget_exhausted.
+     */
+    private $conflict_follow_ups = 0;
 
     public function __construct() {
         // Constructed inside plugins_loaded (CashFlow_Plugin::init). A plugin
@@ -846,35 +848,13 @@ class CashFlow_Catalog {
     }
 
     /**
-     * True once continuing the real-save phase would risk leaving no real
-     * budget for a list-page request this run [task-12, new requirement]. A
-     * long queue of real saves (a bulk edit) can otherwise use the WHOLE
-     * budget, run after run, so the list step (work()'s step 2) never runs
-     * at all and an OPEN list idles out on the server (15 minutes) with
-     * nothing ever advancing it. Checked only when a list is actually open
-     * — an idle list (none open) has nothing to starve, and this changes
-     * nothing about the ordinary hourly-open path (steps 2/3). Reserved:
-     * LIST_RESERVE_SECONDS, the same budget send_page() itself needs to
-     * make REAL progress, not merely to be callable — MIN_LEFT_TO_START
-     * alone would let list_step() start but hand send_page() a budget of
-     * ~0, sending nothing and leaving the list exactly as starved.
-     */
-    private function should_yield_to_list() {
-        $st = self::list_state();
-        if ( empty( $st['list_id'] ) ) {
-            return false;
-        }
-        return ( $this->deadline - self::now() ) < self::LIST_RESERVE_SECONDS;
-    }
-
-    /**
      * [B2, N3, S9, NB3] The brief's own work() replacement was right about
      * the real-save loop and wrong about only one thing: it did not carry
      * drain_solo() forward at all. That is the ONE deviation kept here —
      * drain_solo() [CRITICAL, review-3/4] is still load-bearing (a prior
      * run's budget cutoff must drain one product at a time BEFORE any
      * batch, or the same timeout repeats forever) and is not re-implemented
-     * here, so it stays as step 0, unchanged.
+     * here, so it stays as its own step, unchanged.
      *
      * 🔴 A second deviation was tried and REVERTED (reviewer, d367b28): a
      * `$real_stopped` flag that let the list step run even after a
@@ -898,15 +878,33 @@ class CashFlow_Catalog {
      * first, and list_wanted from a real save opens the list in the same
      * run".
      *
-     * 🔴 A third addition, task-12: real saves no longer drain to
-     * exhaustion when a list is open. should_yield_to_list() breaks step 1
-     * early, with LIST_RESERVE_SECONDS still in hand, so step 2 always gets
-     * a real chance this run — a long real-save backlog (a bulk edit) must
-     * never be able to starve an open list into idling out on the server
-     * (15 minutes) simply by never finishing. See "a long real-save queue
-     * does not starve an open list".
+     * 🔴 A third addition, task-12, REVISED after review: a threshold cannot
+     * bound this. The first version reserved a fixed number of seconds
+     * before a real-save batch, but a single batch's SEND can itself cost
+     * more than the whole reserve (a slow server, or a split cascade after
+     * a 413/500) — reproduced at 0 pages sent across 3 runs at a 6.5–7s or
+     * 13.5s batch cost, since guaranteeing a page after such a batch would
+     * need 28s and a run only has 25. No threshold on the BACK end of a
+     * batch can protect the list; only ORDER can. So: whenever a list is
+     * already OPEN at the start of a run, it gets the very FIRST turn —
+     * before drain_solo, before any real save — one page, if can_start()
+     * allows it. A list that is NOT open yet keeps its current place
+     * (opened at step 2, after real saves), exactly as before: there is
+     * nothing open yet to starve, and this must never make an ordinary
+     * hourly open jump the real-save queue.
      */
     private function work( $secret ) {
+        // -1. An OPEN list goes first, unconditionally [task-12, IMPORTANT
+        //     1] — before solo, before real saves. A 'stop' here ends the
+        //     run exactly like any other 'stop'; anything else (a page sent,
+        //     a conflict followed, no budget to even try) falls through to
+        //     the rest of the run unchanged.
+        $open = self::list_state();
+        if ( ! empty( $open['list_id'] ) && $this->can_start() ) {
+            if ( 'stop' === $this->send_page( $secret, $open ) ) {
+                return;
+            }
+        }
         // 0. Ids a PRIOR run's budget cut short, one at a time, before any
         //    batch [CRITICAL, review-3] — never let one of them ride a
         //    large batch again this run, or the same timeout can repeat.
@@ -917,13 +915,7 @@ class CashFlow_Catalog {
         //    stop. A stop here — for any reason, budget or a wire refusal —
         //    ends the run: the list route shares the same connection and
         //    the same per-IP ceiling, so a refusal there refuses here too.
-        //    When a list is open, this phase yields EARLY — with enough
-        //    budget still in hand for step 2 to make real progress — rather
-        //    than draining every due real save first [task-12].
         while ( true ) {
-            if ( $this->should_yield_to_list() ) {
-                break;
-            }
             $d = $this->drain( $secret, true );
             if ( 'stop' === $d ) {
                 return;
@@ -932,11 +924,10 @@ class CashFlow_Catalog {
                 break;
             }
         }
-        // 2. One list step, so an open list never idles out (15 minutes)
-        //    behind a long queue. Reached only once step 1 finished cleanly
-        //    (nothing due, or everything sent) — list_step() is a no-op
-        //    (no request) when no list is due, so this never adds a call on
-        //    an ordinary tick with nothing further owed to the list.
+        // 2. One list step: opens a NEW list here, its current place — an
+        //    idle list has nothing to protect by going first — or gives an
+        //    already-open one another turn if step -1 didn't (no budget
+        //    then) or the list is still open and not yet due to stop.
         $l = $this->list_step( $secret );
         if ( 'stop' === $l ) {
             return;
@@ -1714,12 +1705,24 @@ class CashFlow_Catalog {
         if ( $budget <= 0 ) {
             return 'idle';
         }
-        $after = max( 0, (int) ( $st['after_id'] ?? 0 ) );
-        $page  = $this->build_page( $after, (int) ( $st['page_size'] ?? self::MAX_LIST_ROWS ), $budget );
+        $after      = max( 0, (int) ( $st['after_id'] ?? 0 ) );
+        // Clamped the same way open_list() clamps a server-given page_size
+        // [task-12, minor]: a stale or corrupted option must never leave
+        // build_page() with a page_size of 0 (the loop would never run) or
+        // one past what the server itself ever hands out.
+        $page_size  = min( self::MAX_LIST_ROWS, max( 1, (int) ( $st['page_size'] ?? self::MAX_LIST_ROWS ) ) );
+        $page       = $this->build_page( $after, $page_size, $budget );
         if ( null === $page ) {
-            return 'idle';   // noted; the same page is built again on the next run
+            return 'idle';   // noted by build_page() itself; the same page is built again on the next run
         }
         if ( ! $this->can_start() ) {
+            // Built, and then dropped: the build alone (or whatever ran just
+            // before this list step) ate enough of the run's budget that
+            // there is no longer room to even START sending it [task-12,
+            // minor — never silent]. The rows are simply not persisted
+            // anywhere, so nothing is lost beyond the time spent building
+            // them; the same page (same after_id) is rebuilt next run.
+            self::note_error( 'A list page was built but there was no time left this run to send it; it will be rebuilt next run' );
             return 'idle';
         }
         $res = $this->post( $secret, self::EP_PAGE, self::encode( [
@@ -1730,9 +1733,25 @@ class CashFlow_Catalog {
             'complete' => $page['complete'],
         ] ) );
         if ( 409 === (int) ( $res['status'] ?? 0 ) ) {
+            // At most ONE conflict followed per run [task-12, IMPORTANT 2] —
+            // see $conflict_follow_ups. A second 409 this run, whatever its
+            // cause, is left exactly where it is: no state change, one note.
+            if ( $this->conflict_follow_ups >= 1 ) {
+                self::note_error( 'CashFlow keeps refusing this list\'s position; leaving it for the next run rather than looping' );
+                return 'idle';
+            }
+            $this->conflict_follow_ups++;
             return $this->follow_conflict( $st, is_array( $res['data'] ?? null ) ? $res['data'] : [] );
         }
         $class = self::classify( $res, [ __CLASS__, 'has_page_shape' ] );
+        if ( 'stop' === $class && ! empty( $res['ok'] ) ) {
+            // A 2xx, but neither of has_page_shape()'s required fields — the
+            // same rule as open_list()/the products route: never read as
+            // "no ids needed, the page landed" [task-12, minor — matches
+            // open_list()'s own wording for the same failure shape].
+            self::note_error( 'Sending a list page failed: CashFlow answered without a page result' );
+            return 'idle';
+        }
         if ( 'ok' !== $class ) {
             self::note_failure( 'Sending a list page', $res );
             return 'stop' === $class ? 'stop' : 'idle';
@@ -1743,11 +1762,20 @@ class CashFlow_Catalog {
         // What CashFlow lacks, holds differently, holds without a fingerprint, or
         // holds as trash while the shop lists it live. Queued as `asked`, which
         // the queue sends after every real save [review-2].
-        $asked = 0;
+        $asked        = 0;
+        $asked_failed = 0;
         foreach ( (array) ( $d['need'] ?? [] ) as $id ) {
-            if ( is_numeric( $id ) && (int) $id > 0 && self::enqueue( (int) $id, 'asked' ) ) {
-                $asked++;
+            if ( ! is_numeric( $id ) || (int) $id <= 0 ) {
+                continue;
             }
+            if ( self::enqueue( (int) $id, 'asked' ) ) {
+                $asked++;
+            } else {
+                $asked_failed++;   // enqueue() already logged the DB reason; the count is what the panel needs [task-12, minor]
+            }
+        }
+        if ( $asked_failed > 0 ) {
+            self::note_error( $asked_failed . ' asked product' . ( 1 === $asked_failed ? '' : 's' ) . ' could not be queued' );
         }
         $st['asked'] = (int) ( $st['asked'] ?? 0 ) + $asked;
 

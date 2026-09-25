@@ -91,6 +91,25 @@ class CF_Test_CatalogDB {
             $wpdb->last_error = 'harness: injected failure in ' . $name;
             return 'query' === $method ? false : ( 'get_var' === $method ? null : [] );
         }
+        // Fails from the Nth call to this statement onward — lets a test put
+        // a REAL success before a failure (e.g. enumerate()'s first CHUNK
+        // succeeds, a later one does not), which a single global switch
+        // cannot express [task-12].
+        CF_TestState::$stmt_call_counts[ $name ] = ( CF_TestState::$stmt_call_counts[ $name ] ?? 0 ) + 1;
+        $call_n = CF_TestState::$stmt_call_counts[ $name ];
+        if ( isset( CF_TestState::$stmt_fail_from_call[ $name ] ) && $call_n >= CF_TestState::$stmt_fail_from_call[ $name ] ) {
+            $wpdb->last_error = 'harness: injected failure in ' . $name . ' (call ' . $call_n . ')';
+            return 'query' === $method ? false : ( 'get_var' === $method ? null : [] );
+        }
+        // A SILENT failure: the statement's method signals it did not work
+        // (a non-array from get_col — the real driver returning false, or
+        // something that isn't a result set) WITHOUT $wpdb->last_error ever
+        // being set. Distinct from the injected failure above, which always
+        // sets last_error — this is the rarer, defensive case a caller must
+        // still catch on the return SHAPE alone [task-12, minor].
+        if ( $name === CF_TestState::$db_silent_failure_on ) {
+            return false;
+        }
         $q = &CF_TestState::$catalog_queue;
         switch ( $name ) {
             case 'show_table':

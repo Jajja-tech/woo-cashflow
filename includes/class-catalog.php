@@ -833,22 +833,35 @@ class CashFlow_Catalog {
     }
 
     /**
-     * [B2, N3, S9, NB3] The brief's own work() replacement did not carry
-     * drain_solo() forward at all, and returned immediately on ANY real-save
-     * 'stop' — both wrong now that a list exists alongside the queue:
-     *   - drain_solo() [CRITICAL, review-3/4] is still load-bearing (a prior
-     *     run's budget cutoff must drain one product at a time BEFORE any
-     *     batch, or the same timeout repeats forever) and is not
-     *     re-implemented here — kept as step 0, unchanged.
-     *   - a real-save 'stop' must NOT skip the list step: it is a different
-     *     route on the same connection, and an open list must never idle
-     *     out (15 minutes) behind a struggling queue (proven by this task's
-     *     own "real saves still go first" test, which scripts a malformed
-     *     /products reply — a 'stop' — and still expects list/open to be
-     *     tried second). It DOES still stop this tick from claiming any
-     *     FURTHER real-save batch or entering step 3's "everything else"
-     *     loop: repeating an identical refusal buys nothing (matches
-     *     catalogSend/catalogFailures' "one request, then the run ends").
+     * [B2, N3, S9, NB3] The brief's own work() replacement was right about
+     * the real-save loop and wrong about only one thing: it did not carry
+     * drain_solo() forward at all. That is the ONE deviation kept here —
+     * drain_solo() [CRITICAL, review-3/4] is still load-bearing (a prior
+     * run's budget cutoff must drain one product at a time BEFORE any
+     * batch, or the same timeout repeats forever) and is not re-implemented
+     * here, so it stays as step 0, unchanged.
+     *
+     * 🔴 A second deviation was tried and REVERTED (reviewer, d367b28): a
+     * `$real_stopped` flag that let the list step run even after a
+     * real-save `'stop'`. It was motivated by a test fixture that scripted
+     * a 2xx `/products` reply carrying only `list_wanted` — which predates
+     * `has_shape()` and is not a reply the wire contract can produce, since
+     * `has_shape()` already requires `applied`/`trashed`/`unchanged` on
+     * every 2xx. Probed against every REAL cause of a real-save `'stop'`
+     * (401, 403, 429, an outage, 404, a malformed or shapeless reply): the
+     * SAME connection-level fault refuses or fails the list route too, so
+     * the flag doubled the request against the shared per-IP ceiling and
+     * wrote two log lines a minute, forever, on any store the products
+     * route is refusing. The brief's `if ('stop' === $d) { return; }` was
+     * correct: a real-save `'stop'` ends the run before the list step, same
+     * as it always ended the run before step 3 — see
+     * catalogFailures.test.php's "a stop is nobody's try" (one request,
+     * then the run ends) and this file's own "a real-save stop never
+     * touches the list route" for the list-route proof. `list_wanted` still
+     * opens a list in the SAME run when the real save's own reply is a real
+     * 2xx (has_shape()-shaped) carrying it — see "real saves still go
+     * first, and list_wanted from a real save opens the list in the same
+     * run".
      */
     private function work( $secret ) {
         // 0. Ids a PRIOR run's budget cut short, one at a time, before any
@@ -857,25 +870,26 @@ class CashFlow_Catalog {
         if ( 'stop' === $this->drain_solo( $secret ) ) {
             return;
         }
-        // 1. Real saves first [review-2], until none is due, the run must
-        //    stop for budget, or the products route itself refuses.
-        $real_stopped = false;
+        // 1. Real saves first [review-2], until none is due or the run must
+        //    stop. A stop here — for any reason, budget or a wire refusal —
+        //    ends the run: the list route shares the same connection and
+        //    the same per-IP ceiling, so a refusal there refuses here too.
         while ( true ) {
             $d = $this->drain( $secret, true );
             if ( 'stop' === $d ) {
-                $real_stopped = true;
-                break;
+                return;
             }
             if ( 'empty' === $d ) {
                 break;
             }
         }
         // 2. One list step, so an open list never idles out (15 minutes)
-        //    behind a long queue. list_step() is a no-op (no request) when
-        //    no list is due, so this never adds a call on an ordinary tick
-        //    where step 1 finished cleanly with nothing further owed.
+        //    behind a long queue. Reached only once step 1 finished cleanly
+        //    (nothing due, or everything sent) — list_step() is a no-op
+        //    (no request) when no list is due, so this never adds a call on
+        //    an ordinary tick with nothing further owed to the list.
         $l = $this->list_step( $secret );
-        if ( 'stop' === $l || $real_stopped ) {
+        if ( 'stop' === $l ) {
             return;
         }
         // 3. What is left of the budget: the rest of the queue, then more of
@@ -1116,19 +1130,28 @@ class CashFlow_Catalog {
      * The list/open equivalent of has_shape() [override #2]. A 2xx from
      * that route counts as success only when it carries one of the wire's
      * two answers: a list to work from (list_id, after_id, page_size — as
-     * the contract names them) or later. Unlike has_shape() the values here
-     * are scalars, not arrays, so this is not folded into has_shape() itself
-     * — but classify() still decides ok/not-ok from THIS, never a second
-     * status table. retry_after_seconds is deliberately not required: the
-     * wire always sends it alongside later, and open_list() defaults it if
-     * a future reply ever omits it — later alone is proof enough this is
-     * the "wait" answer.
+     * the contract names them) or later === true. Unlike has_shape() the
+     * values here are scalars, not arrays, so this is not folded into
+     * has_shape() itself — but classify() still decides ok/not-ok from
+     * THIS, never a second status table. retry_after_seconds is
+     * deliberately not required: the wire always sends it alongside later,
+     * and open_list() defaults it if a future reply ever omits it — a
+     * strict `later` alone is proof enough this is the "wait" answer.
+     *
+     * 🔴 `later` MUST be checked with `true === `, not `isset()` (reviewer,
+     * d367b28). `isset($data['later'])` is also true for `{"later": false}`
+     * — a reply that is neither a list nor a wait — which would have made
+     * classify() call it 'ok', open_list() skip the (falsy) later branch,
+     * and fall through to save_list_state() reading an UNSET `list_id`: a
+     * PHP warning, and a saved list_id of '' recorded as a genuinely opened
+     * list. Anything that is not exactly `later: true` and not a real list
+     * is a failure, same as any other malformed 2xx.
      */
     public static function has_open_shape( $data ) {
         if ( ! is_array( $data ) ) {
             return false;
         }
-        if ( isset( $data['later'] ) ) {
+        if ( true === ( $data['later'] ?? null ) ) {
             return true;
         }
         return isset( $data['list_id'] ) && is_string( $data['list_id'] ) && '' !== $data['list_id']
@@ -1593,6 +1616,10 @@ class CashFlow_Catalog {
             'last_list_opened_at' => self::now_iso(),
             'last_list_resumed'   => ! empty( $d['resumed'] ),
             'last_list_resend'    => ! empty( $d['resend'] ),
+            // [item 5, reviewer d367b28] a real open REPLACES a stale 'later'
+            // result — without this, a store paced by 'later' on one run and
+            // opened for real the next would still show 'later' on the panel.
+            'last_list'           => [ 'result' => 'opened', 'at' => self::now_iso() ],
         ] );
         return 'opened';
     }

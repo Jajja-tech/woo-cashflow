@@ -79,6 +79,7 @@ $T += 1;
 opens( $opened );
 run_job();
 ok( 'at 600 s it does', count( calls_to( '/plugin/catalog/list/open' ) ) === 2 && ( CashFlow_Catalog::list_state()['list_id'] ?? null ) === LIST_ID );
+ok( 'a successful open replaces a stale "later" result on the panel [item 5]', ( CashFlow_Catalog::stats()['last_list']['result'] ?? '' ) === 'opened' );
 
 echo "── the server's position and page size are followed\n";
 store();
@@ -133,15 +134,53 @@ run_job();
 ok( 'a 200 with no list id is not a list', empty( CashFlow_Catalog::list_state()['list_id'] )
     && str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'without a list id' ) );
 
-echo "── real saves still go first\n";
+echo "── has_open_shape: later must be exactly true — anything else is a failure, not a guess [item 4, reviewer d367b28]\n";
 store();
+$warnings = [];
+set_error_handler( function ( $errno, $errstr ) use ( &$warnings ) { $warnings[] = $errstr; return true; } );
+opens( [ 'later' => false, 'retry_after_seconds' => 600 ] );
+run_job();
+restore_error_handler();
+$st = CashFlow_Catalog::list_state();
+ok( 'later:false holds no list id — it is not an open list', empty( $st['list_id'] ) );
+ok( 'and no retry_at either — it never took the later branch', empty( $st['retry_at'] ) );
+ok( 'last_opened_at was never set', empty( $st['last_opened_at'] ) );
+ok( 'the panel says why, the same wording as any other malformed 2xx',
+    str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'without a list id' ) );
+ok( 'no PHP warning reading a field the malformed reply never sent', $warnings === [], json_encode( $warnings ) );
+
+echo "── real saves still go first, and list_wanted from a real save opens the list in the same run [item 2, reviewer d367b28]\n";
+store();
+CF_TestState::$options['cashflow_catalog_list'] = [ 'last_opened_at' => $T - 60 ];   // not due by the clock alone
 CF_TestState::$products[501] = new WC_Product( 501, 0, 'publish', [ 'name' => 'Scarf' ] );
 CashFlow_Catalog::enqueue( 501, 'save' );
-CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => true, 'status' => 200, 'data' => [ 'list_wanted' => true ] ];
+CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => true, 'status' => 200,
+    'data' => [ 'applied' => [ 501 ], 'trashed' => [], 'unchanged' => [], 'list_wanted' => true ] ];
 opens( $opened );
 run_job();
 // (Once pages exist, the list's first page follows in the same run; only the order of the first two matters here.)
 ok( 'the save, then the list', array_slice( array_column( CF_TestState::$api_calls, 'endpoint' ), 0, 2 ) === [ '/plugin/catalog/products', '/plugin/catalog/list/open' ] );
+ok( 'list_wanted from the save\'s own reply is what opened it, not the clock (last_opened_at was only 60s ago)',
+    ( CashFlow_Catalog::list_state()['list_id'] ?? null ) === LIST_ID );
+
+echo "── a real-save stop never touches the list route — the brief was right; only the test fixture above predated has_shape() [item 1 & 3, reviewer d367b28]\n";
+$stops = [
+    '401'    => [ 'ok' => false, 'status' => 401, 'data' => [ 'error' => 'invalid connection secret' ] ],
+    '403'    => [ 'ok' => false, 'status' => 403, 'data' => [ 'error' => 'connection_not_eligible', 'reason' => 'not_connected' ] ],
+    '429'    => [ 'ok' => false, 'status' => 429, 'data' => [ 'message' => 'Too many requests' ] ],
+    'outage' => [ 'ok' => false, 'status' => 0, 'error' => 'cURL error 28: Operation timed out after 10001 milliseconds', 'data' => null ],
+];
+foreach ( $stops as $name => $answer ) {
+    store();
+    CF_TestState::$products[501] = new WC_Product( 501, 0, 'publish', [ 'name' => 'Scarf' ] );
+    CashFlow_Catalog::enqueue( 501, 'save' );
+    CF_TestState::$api_responses['/plugin/catalog/products'][] = $answer;   // list/open deliberately left UNSCRIPTED — it must never be called
+    run_job();
+    ok( "$name: no list/open call", calls_to( '/plugin/catalog/list/open' ) === [] );
+    ok( "$name: exactly one log line, not two",
+        count( CF_TestState::$log ) === 1,
+        count( CF_TestState::$log ) . ' log lines: ' . json_encode( array_column( CF_TestState::$log, 'message' ) ) );
+}
 
 echo "── the order poll declares the capability, and it is not a command\n";
 store();

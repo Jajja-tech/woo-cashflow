@@ -51,6 +51,28 @@ class CashFlow_Catalog {
     /** Hooks that pass a product object. */
     const HOOKS_PRODUCT = [ 'woocommerce_product_set_stock', 'woocommerce_variation_set_stock' ];
 
+    // ── What is sent: caps equal to the server's cuts [NB7] ─────────
+    // The backend's catalogPluginContract.test.js pins these to its LIMITS, so
+    // the server never cuts a field this plugin already fingerprinted.
+    const CAP_NAME         = 500;
+    const CAP_SKU          = 100;
+    const CAP_TYPE         = 40;
+    const CAP_STATUS       = 20;
+    const CAP_STOCK_STATUS = 40;
+    const CAP_TERM_NAME    = 200;
+    const CAP_TERM_SLUG    = 200;
+    const CAP_TERMS        = 100;
+    const CAP_VARIATIONS   = 1000;
+    const CAP_IMAGE_URL    = 2048;
+    const CAP_NUMBER       = 40;     // price and weight strings; no real number is longer
+    /** One product's share of an 80 KB body, leaving room for the envelope. */
+    const MAX_ONE_BYTES    = 65536;
+    /**
+     * The encoding used for the fingerprint AND the body. Changing it changes
+     * every fingerprint and makes the next list ask for the whole catalogue.
+     */
+    const JSON_FLAGS = JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PARTIAL_OUTPUT_ON_ERROR;
+
     /** Injectable clock: a callable returning seconds as a float. Null means the real clock. */
     public static $clock = null;
 
@@ -397,6 +419,173 @@ class CashFlow_Catalog {
             // the failure must not be what breaks the save.
             try { self::note_error( 'A product change could not be queued: ' . $e->getMessage() ); } catch ( Throwable $ignored ) {}
         }
+    }
+
+    // ── The payload [B1, S3, NB2] ───────────────────────────────────
+
+    /**
+     * The one payload builder. It feeds BOTH the send and the fingerprint.
+     * WC_Product getters in 'edit' context: the stored values, before display
+     * filters. Never prepare_object_for_response — it runs every REST filter
+     * another plugin has added and costs far more per product. [NB2]
+     */
+    public static function payload( $product ) {
+        $image_id = (int) $product->get_image_id( 'edit' );
+        if ( $image_id <= 0 ) {
+            // The REST API's images[0] is the featured image, else the first gallery image.
+            $gallery  = array_values( (array) $product->get_gallery_image_ids( 'edit' ) );
+            $image_id = isset( $gallery[0] ) ? (int) $gallery[0] : 0;
+        }
+        $src = $image_id > 0 ? wp_get_attachment_url( $image_id ) : false;
+        $src = is_string( $src ) ? self::clean( $src ) : '';
+        // Like the server: a URL over 2,048 characters is dropped, never cut — a cut URL is a broken one.
+        $images = ( '' !== $src && mb_strlen( $src, 'UTF-8' ) <= self::CAP_IMAGE_URL ) ? [ [ 'src' => $src ] ] : [];
+
+        $variations = [];
+        if ( $product->is_type( 'variable' ) ) {
+            // WC_Product_Variable::get_children( $visible_only = '' ) takes no context.
+            $variations = array_values( array_filter( array_map( 'intval', (array) $product->get_children() ),
+                function ( $v ) { return $v > 0; } ) );
+            sort( $variations, SORT_NUMERIC );
+            $variations = array_slice( $variations, 0, self::CAP_VARIATIONS );
+        }
+        $stock = $product->get_stock_quantity( 'edit' );
+
+        $fields = [
+            'id'                    => (int) $product->get_id(),
+            'name'                  => self::cap( $product->get_name( 'edit' ), self::CAP_NAME ),
+            'sku'                   => self::cap( $product->get_sku( 'edit' ), self::CAP_SKU ),
+            'type'                  => self::cap( $product->get_type(), self::CAP_TYPE ),
+            'status'                => self::cap( $product->get_status( 'edit' ), self::CAP_STATUS ),
+            'regular_price'         => self::cap( $product->get_regular_price( 'edit' ), self::CAP_NUMBER ),
+            'sale_price'            => self::cap( $product->get_sale_price( 'edit' ), self::CAP_NUMBER ),
+            'price'                 => self::cap( $product->get_price( 'edit' ), self::CAP_NUMBER ),
+            'date_on_sale_from_gmt' => self::gmt( $product->get_date_on_sale_from( 'edit' ) ),
+            'date_on_sale_to_gmt'   => self::gmt( $product->get_date_on_sale_to( 'edit' ) ),
+            'stock_quantity'        => is_numeric( $stock ) ? 0 + $stock : null,
+            'stock_status'          => self::cap( $product->get_stock_status( 'edit' ), self::CAP_STOCK_STATUS ),
+            'manage_stock'          => (bool) $product->get_manage_stock( 'edit' ),
+            'weight'                => self::cap( $product->get_weight( 'edit' ), self::CAP_NUMBER ),
+            'categories'            => self::terms( $product->get_category_ids( 'edit' ), 'product_cat' ),
+            'tags'                  => self::terms( $product->get_tag_ids( 'edit' ), 'product_tag' ),
+            'images'                => $images,
+            'variations'            => $variations,
+        ];
+        $fields = self::fit( $fields );
+        return [ 'fields' => $fields, 'fingerprint' => self::fingerprint( $fields ) ];
+    }
+
+    /** MD5 of the fields encoded with keys sorted at every depth. Computed ONLY here, only in PHP. */
+    public static function fingerprint( array $fields ) {
+        return md5( self::encode( self::sorted( $fields ) ) );
+    }
+
+    public static function encode( $value ) {
+        $json = json_encode( $value, self::JSON_FLAGS );
+        return false === $json ? 'null' : $json;
+    }
+
+    private static function sorted( $v ) {
+        if ( ! is_array( $v ) ) {
+            return $v;
+        }
+        $is_list = [] === $v || array_keys( $v ) === range( 0, count( $v ) - 1 );
+        $out = [];
+        foreach ( $v as $k => $x ) {
+            $out[ $k ] = self::sorted( $x );
+        }
+        if ( ! $is_list ) {
+            ksort( $out, SORT_STRING );
+        }
+        return $out;
+    }
+
+    /**
+     * Keep one product inside MAX_ONE_BYTES, deterministically (so the
+     * fingerprint of the fitted payload is stable). The caps alone do not
+     * guarantee it: 100 categories + 100 tags of 200-character names and slugs
+     * of control characters (6 bytes each when escaped) is ~480 KB. After every
+     * step the worst case is 10 categories (~24 KB) + name 100 + sku 100 +
+     * image 2,048 characters (~13 KB) + 100 variations — under 40 KB.
+     */
+    private static function fit( array $f ) {
+        $steps = [
+            function ( $f ) { $f['tags'] = []; return $f; },
+            function ( $f ) { $f['categories'] = array_slice( $f['categories'], 0, 10 ); return $f; },
+            function ( $f ) { $f['variations'] = array_slice( $f['variations'], 0, 100 ); return $f; },
+            function ( $f ) { $f['name'] = mb_substr( $f['name'], 0, 100, 'UTF-8' ); return $f; },
+        ];
+        foreach ( $steps as $step ) {
+            if ( strlen( self::encode( $f ) ) <= self::MAX_ONE_BYTES ) {
+                return $f;
+            }
+            $f = $step( $f );
+        }
+        return $f;
+    }
+
+    private static function terms( $ids, $taxonomy ) {
+        $ids = array_values( array_unique( array_filter( array_map( 'intval', (array) $ids ), function ( $i ) { return $i > 0; } ) ) );
+        if ( ! $ids ) {
+            return [];   // never call get_terms with an empty include: core returns EVERY term
+        }
+        sort( $ids, SORT_NUMERIC );
+        $ids = array_slice( $ids, 0, self::CAP_TERMS );
+        // hide_empty FALSE: core's default hides a term no published product
+        // uses, and it would silently vanish from this product's payload.
+        $terms = get_terms( [ 'taxonomy' => $taxonomy, 'include' => $ids, 'hide_empty' => false ] );
+        if ( ! is_array( $terms ) ) {
+            throw new RuntimeException( 'Could not read ' . $taxonomy . ' terms: '
+                . ( is_wp_error( $terms ) ? $terms->get_error_message() : 'unexpected answer' ) );
+        }
+        $out = [];
+        foreach ( $terms as $t ) {
+            $out[] = [
+                'id'   => (int) $t->term_id,
+                'name' => self::cap( $t->name, self::CAP_TERM_NAME ),
+                'slug' => self::cap( $t->slug, self::CAP_TERM_SLUG ),
+            ];
+        }
+        usort( $out, function ( $a, $b ) { return $a['id'] <=> $b['id']; } );
+        return $out;
+    }
+
+    /** A string of at most $max characters, valid UTF-8, no U+0000. */
+    private static function cap( $value, $max ) {
+        $s = self::clean( is_scalar( $value ) ? (string) $value : '' );
+        return mb_strlen( $s, 'UTF-8' ) > $max ? mb_substr( $s, 0, $max, 'UTF-8' ) : $s;
+    }
+
+    private static function clean( $s ) {
+        $s = (string) $s;
+        if ( function_exists( 'mb_scrub' ) ) {
+            $s = mb_scrub( $s, 'UTF-8' );
+        } elseif ( function_exists( 'wp_check_invalid_utf8' ) ) {
+            $s = wp_check_invalid_utf8( $s, true );
+        }
+        return str_replace( "\0", '', $s );
+    }
+
+    /** WooCommerce's zone-less UTC string, as the REST API writes *_gmt; null for anything not a date. */
+    private static function gmt( $date ) {
+        return $date instanceof DateTimeInterface ? gmdate( 'Y-m-d\TH:i:s', $date->getTimestamp() ) : null;
+    }
+
+    private static $last_seq = 0;
+
+    /**
+     * The plugin's microsecond WALL clock as an integer STRING [NB5]. Wall clock,
+     * so it keeps rising across reinstalls [review-2]; a string, because a float
+     * cannot carry 16 digits exactly everywhere. Never repeats in one process.
+     */
+    public static function next_seq() {
+        $parts = explode( ' ', microtime() );                   // "0.12345600 1790312345"
+        $seq   = (int) ( $parts[1] . substr( $parts[0], 2, 6 ) );
+        if ( $seq <= self::$last_seq ) {
+            $seq = self::$last_seq + 1;
+        }
+        self::$last_seq = $seq;
+        return (string) $seq;
     }
 
     // ── Stats: a bounded option the status panel reads ──────────────

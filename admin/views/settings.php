@@ -112,6 +112,79 @@ $site_url  = CashFlow_Security::get_verified_site_url();
       </div>
     </div>
     <?php endif; ?>
+
+    <!-- Catalogue: product changes sent to CashFlow by their own minutely job -->
+    <?php $cf_cat = class_exists( 'CashFlow_Catalog' ) ? CashFlow_Catalog::status_summary() : null; ?>
+    <?php if ( $cf_cat ) : ?>
+    <div class="cf-card" style="margin-top:16px">
+      <div class="cf-card-header">
+        <h2><?php echo cf_icon( 'arrow-up-right', 16 ); ?> Catalogue</h2>
+        <p>Product changes are sent to CashFlow about once a minute, and the full product list is checked once an hour</p>
+      </div>
+      <div class="cf-card-body">
+        <?php if ( ! $cf_cat['table_ready'] ) : ?>
+          <p class="cf-guidance-text" style="color:#b32d2e">
+            <strong>The catalogue queue table is missing.</strong> Product changes are not being sent to CashFlow.
+            It is created automatically on the next page load; if this message stays, the database user may not be
+            allowed to create tables.
+          </p>
+        <?php endif; ?>
+        <?php if ( ! $cf_cat['available'] ) : ?>
+          <p class="cf-guidance-text" style="color:#b32d2e">
+            <strong>The catalogue job cannot run</strong> — Action Scheduler was not found (it ships inside WooCommerce).
+          </p>
+        <?php endif; ?>
+        <?php if ( $cf_cat['not_connected'] ) : ?>
+          <p class="cf-guidance-text" style="color:#b32d2e">
+            <strong>Not connected:</strong> CashFlow did not accept this site's connection, so no product changes are being sent.
+          </p>
+        <?php endif; ?>
+        <?php if ( $cf_cat['site_refusal'] ) : ?>
+          <p class="cf-guidance-text" style="color:#b32d2e">
+            <strong>CashFlow refused this site's products</strong>
+            (<?php echo esc_html( (string) ( $cf_cat['site_refusal']['reason'] ?? '' ) ); ?>): the addresses this site reports —
+            <?php echo esc_html( (string) ( $cf_cat['site_refusal']['site']['siteurl'] ?? '' ) ); ?> and
+            <?php echo esc_html( (string) ( $cf_cat['site_refusal']['site']['home'] ?? '' ) ); ?> —
+            are not the store address CashFlow holds for this connection.
+          </p>
+        <?php endif; ?>
+        <div class="cf-info-grid">
+          <div class="cf-info-item">
+            <span class="cf-info-label">Waiting to send</span>
+            <span><?php echo (int) $cf_cat['pending']; ?></span>
+          </div>
+          <div class="cf-info-item">
+            <span class="cf-info-label">Last sent (UTC)</span>
+            <span><?php echo '' !== $cf_cat['last_send_at'] ? esc_html( $cf_cat['last_send_at'] ) : 'Never'; ?></span>
+          </div>
+          <div class="cf-info-item">
+            <span class="cf-info-label">Products sent</span>
+            <span><?php echo (int) $cf_cat['sent_count']; ?></span>
+          </div>
+          <div class="cf-info-item">
+            <span class="cf-info-label">Warnings (last send)</span>
+            <span><?php echo (int) $cf_cat['last_warnings']; ?></span>
+          </div>
+          <div class="cf-info-item">
+            <span class="cf-info-label">Hourly check</span>
+            <span><?php echo esc_html( $cf_cat['last_list_text'] ); ?></span>
+          </div>
+        </div>
+        <?php if ( $cf_cat['parked'] > 0 ) : ?>
+          <p class="cf-guidance-text" style="color:#b32d2e; margin-top:12px">
+            <strong><?php echo (int) $cf_cat['parked']; ?> product(s) could not be sent after 5 tries</strong> and are set aside:
+            product ID <?php echo esc_html( implode( ', ', array_map( 'intval', $cf_cat['parked_ids'] ) ) ); ?>.
+            Saving one of them sends it again; the hourly check also asks for it.
+          </p>
+        <?php endif; ?>
+        <?php if ( '' !== $cf_cat['last_error'] ) : ?>
+          <p class="cf-guidance-text" style="color:#b32d2e; margin-top:12px">
+            <strong>Last error:</strong> <?php echo esc_html( $cf_cat['last_error'] ); ?>
+          </p>
+        <?php endif; ?>
+      </div>
+    </div>
+    <?php endif; ?>
   </div>
 
   <!-- Panel: Sync Settings -->

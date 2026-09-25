@@ -797,7 +797,12 @@ class CashFlow_Catalog {
     }
 
     private static function now_iso() {
-        return gmdate( 'c', (int) floor( self::now() ) );
+        return self::iso_at( self::now() );
+    }
+
+    /** ISO 8601 (UTC) for an arbitrary epoch-seconds timestamp — same format as now_iso(). */
+    private static function iso_at( $timestamp ) {
+        return gmdate( 'c', (int) floor( (float) $timestamp ) );
     }
 
     /** Always on the panel; in the sync log only when the message changes (not once a minute). */
@@ -1719,7 +1724,10 @@ class CashFlow_Catalog {
             // Too many heavy lists open across all stores: the server paces us.
             $st['retry_at'] = self::now() + max( 60, (int) ( $d['retry_after_seconds'] ?? 600 ) );
             self::save_list_state( $st );
-            self::update_stats( [ 'last_list' => [ 'result' => 'later', 'at' => self::now_iso() ] ] );
+            // retry_at rides IN $last (not a sibling stats key) so
+            // describe_list() — whose interface is `( ?array $last )` alone —
+            // can say when the next try is without a second argument [task-14].
+            self::update_stats( [ 'last_list' => [ 'result' => 'later', 'at' => self::now_iso(), 'retry_at' => self::iso_at( $st['retry_at'] ) ] ] );
             return 'idle';
         }
         if ( ! empty( $d['resend'] ) && ! self::queue_whole_set_for_resend() ) {
@@ -1945,6 +1953,87 @@ class CashFlow_Catalog {
         ] );
         self::update_stats( [ 'last_list' => [ 'result' => '' !== $err ? $err : 'conflict', 'at' => self::now_iso() ] ] );
         return 'page';
+    }
+
+    // ── The status panel (admin/views/settings.php) ─────────────────
+
+    /**
+     * Everything the Catalogue card renders. No secrets. Never throws — a
+     * database failure while counting reads as "table not ready", never a
+     * broken admin page [Golden Rule #6].
+     */
+    public static function status_summary() {
+        $s  = self::stats();
+        $st = self::list_state();
+        try {
+            $ready      = self::table_exists();
+            $pending    = $ready ? self::count_pending() : 0;
+            $parked     = $ready ? self::count_parked() : 0;
+            $parked_ids = ( $ready && $parked > 0 ) ? self::parked_ids() : [];
+        } catch ( Throwable $e ) {
+            $ready = false; $pending = 0; $parked = 0; $parked_ids = [];
+        }
+        $last = is_array( $s['last_list'] ?? null ) ? $s['last_list'] : null;
+        return [
+            'available'      => self::is_available(),
+            'scheduled'      => self::is_scheduled(),
+            'table_ready'    => $ready,
+            'pending'        => $pending,
+            'parked'         => $parked,
+            'parked_ids'     => $parked_ids,
+            'last_send_at'   => (string) ( $s['last_send_at'] ?? '' ),
+            'sent_count'     => (int) ( $s['sent_count'] ?? 0 ),
+            // The warnings the LAST successful send carried (on_products_ok
+            // resets it to 0 whenever a send lands with none) — the wire
+            // contract's per-field row problems (a truncated name, a bad
+            // number, a dropped row) are never a 4xx, so this is the only
+            // place they would ever reach the merchant [Golden Rule #6].
+            'last_warnings'  => (int) ( $s['last_warnings'] ?? 0 ),
+            'list_open'      => ! empty( $st['list_id'] ),
+            'list_position'  => (int) ( $st['after_id'] ?? 0 ),
+            'last_list'      => $last,
+            'last_list_text' => self::describe_list( $last ),
+            'site_refusal'   => is_array( $s['site_refusal'] ?? null ) ? $s['site_refusal'] : null,
+            'not_connected'  => ! empty( $s['not_connected'] ),
+            'last_error'     => (string) ( $s['last_error'] ?? '' ),
+            'last_error_at'  => (string) ( $s['last_error_at'] ?? '' ),
+        ];
+    }
+
+    /**
+     * The last list's outcome in plain words. An outcome this version does
+     * not know is shown as it came, never hidden [Golden Rule #6]. `later`
+     * carries its own retry time IN $last (open_list() writes it there),
+     * because this method's interface is `( ?array $last )` alone.
+     */
+    public static function describe_list( $last ) {
+        if ( ! is_array( $last ) || empty( $last['result'] ) ) {
+            return 'Not yet run';
+        }
+        $trashed = (int) ( $last['trashed'] ?? 0 );
+        $asked   = (int) ( $last['asked'] ?? 0 );
+        switch ( (string) $last['result'] ) {
+            case 'trashed':
+            case 'complete':
+                if ( 0 === $trashed && 0 === $asked ) {
+                    return 'Complete: CashFlow matches the shop';
+                }
+                return 'Complete: ' . $trashed . ' removed from the shop marked as trash in CashFlow; ' . $asked . ' re-sent';
+            case 'trash_refused':
+                return 'Complete, but CashFlow held back removing many products at once; the next complete list confirms it';
+            case 'flawed':
+                return 'Complete, but a page was unusable, so nothing was removed';
+            case 'later':
+                $retry = is_string( $last['retry_at'] ?? null ) ? (string) $last['retry_at'] : '';
+                return 'Waiting: CashFlow asked to try later' . ( '' !== $retry ? '; it will try again at ' . $retry : '' );
+            case 'list_expired':
+                return 'Restarted: the list sat idle too long';
+            case 'list_not_found':
+                return 'Restarted: CashFlow did not know the list';
+            case 'list_closed':
+                return 'Already complete';
+        }
+        return 'Last result: ' . (string) $last['result'];
     }
 
     // ── The solo list [CRITICAL, review-3] ───────────────────────────

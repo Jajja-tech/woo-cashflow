@@ -1576,10 +1576,12 @@ class CashFlow_Catalog {
         $code = (int) ( $res['status'] ?? 0 );
         $data = is_array( $res['data'] ?? null ) ? $res['data'] : [];
         $err  = (string) ( $data['error'] ?? '' );
+        // One refusal at a time: the current one replaces the other, so the
+        // card never shows a stale refusal beside the one happening now.
         if ( 401 === $code ) {
-            self::update_stats( [ 'not_connected' => true ] );
+            self::update_stats( [ 'not_connected' => true, 'site_refusal' => null ] );
         } elseif ( 403 === $code && 'site_mismatch' === $err ) {
-            self::update_stats( [ 'site_refusal' => [
+            self::update_stats( [ 'not_connected' => false, 'site_refusal' => [
                 'reason' => (string) ( $data['reason'] ?? '' ),
                 'at'     => self::now_iso(),
                 'site'   => self::site(),

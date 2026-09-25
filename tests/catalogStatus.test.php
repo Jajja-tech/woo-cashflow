@@ -81,6 +81,7 @@ ok( 'and the error line carries the reason', str_contains( $s['last_error'], 'ho
 CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 401, 'data' => [ 'error' => 'invalid connection secret' ] ];
 ( new CashFlow_Catalog() )->tick();
 ok( 'a 401 shows as not connected', true === CashFlow_Catalog::status_summary()['not_connected'] );
+ok( 'and the earlier site refusal no longer shows beside it — only the current refusal does', null === CashFlow_Catalog::status_summary()['site_refusal'] );
 
 echo "── the last list, in plain words\n";
 $cases = [

@@ -24,6 +24,7 @@ if ( ! preg_match( "/define\\(\\s*'CASHFLOW_VERSION',\\s*'([^']+)'/", (string) f
 define( 'CASHFLOW_VERSION', $cf_v[1] );
 define( 'CASHFLOW_OPTION_KEY', 'cashflow_sync_v2' );
 define( 'CASHFLOW_API_BASE_DEFAULT', 'https://api.cashflow.pk' );
+defined( 'ARRAY_A' ) || define( 'ARRAY_A', 'ARRAY_A' );   // core's value
 
 // ── the recorder every stub writes to ────────────────────────────────────
 class CF_TestState {
@@ -54,6 +55,13 @@ class CF_TestState {
     public static int   $cache_flushes = 0;
     public static array $product_reads = [];  // every WC_Product getter read: [ prop, context ]
     public static $on_product_get = null;     // callable( string $prop, WC_Product ): runs inside every getter
+    public static array $catalog_tables = [];  // table name => true (created by dbDelta)
+    public static array $catalog_queue = [];   // the queue TABLE: id => row, values as MySQL returns them (strings / null)
+    public static int   $catalog_queue_next = 1;
+    public static ?string $db_error_on = null; // a catalogue statement whose SQL contains this fails like MySQL
+    public static array $dbdelta = [];         // every SQL dbDelta was handed
+    public static bool  $dbdelta_creates = true;
+    public static ?Throwable $dbdelta_throws = null;
 
     public static function reset(): void {
         self::$orders = [];
@@ -82,6 +90,13 @@ class CF_TestState {
         self::$cache_flushes = 0;
         self::$product_reads = [];
         self::$on_product_get = null;
+        self::$catalog_tables = [];
+        self::$catalog_queue = [];
+        self::$catalog_queue_next = 1;
+        self::$db_error_on = null;
+        self::$dbdelta = [];
+        self::$dbdelta_creates = true;
+        self::$dbdelta_throws = null;
     }
 }
 
@@ -138,6 +153,21 @@ function as_unschedule_all_actions( $hook, $args = [], $group = '' ) {
     CF_TestState::$as_calls[] = [ 'fn' => 'unschedule_all', 'hook' => $hook, 'group' => $group ];
     unset( CF_TestState::$as_scheduled[ $hook ] );
 }
+
+/**
+ * dbDelta — records the SQL and creates the table it names. Modelled failures:
+ * $dbdelta_creates = false (the CREATE did not take: permissions, a full disk)
+ * and $dbdelta_throws.
+ */
+function dbDelta( $queries = '', $execute = true ) {
+    CF_TestState::$dbdelta[] = $queries;
+    if ( CF_TestState::$dbdelta_throws ) { throw CF_TestState::$dbdelta_throws; }
+    if ( CF_TestState::$dbdelta_creates && preg_match( '/CREATE TABLE (\S+) \(/', (string) $queries, $m ) ) {
+        CF_TestState::$catalog_tables[ $m[1] ] = true;
+    }
+    return [];
+}
+
 function add_filter( $hook, $cb = null, $prio = 10, $args = 1 ) { CF_TestState::$filters[ $hook ][] = $cb; return true; }
 function sanitize_text_field( $s ) { return trim( strip_tags( (string) $s ) ); }
 function wp_unslash( $v ) { return $v; }
@@ -193,12 +223,20 @@ if ( ! class_exists( 'CashFlow_Plugin' ) ) {
 class CF_Test_WPDB {
     public string $options = 'wp_options';
     public string $prefix  = 'wp_';
+    public string $posts   = 'wp_posts';
+    public string $last_error = '';
+    public function get_charset_collate() { return 'DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci'; }
     public function prepare( $sql, ...$args ) {
         $args = ( count( $args ) === 1 && is_array( $args[0] ) ) ? $args[0] : $args;
         return [ 'sql' => $sql, 'args' => $args ];
     }
+    private static function split( $q ): array {
+        return is_array( $q ) ? [ $q['sql'], $q['args'] ] : [ (string) $q, [] ];
+    }
     public function query( $q ) {
-        [ $sql, $a ] = [ $q['sql'], $q['args'] ];
+        $this->last_error = '';
+        [ $sql, $a ] = self::split( $q );
+        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'query', $name, $a, $this ); }
         CF_TestState::$sql[] = $sql;
         $t = &CF_TestState::$db_options;
         if ( str_starts_with( $sql, "INSERT IGNORE INTO {$this->options} (option_name, option_value, autoload)" ) ) {
@@ -216,16 +254,33 @@ class CF_Test_WPDB {
         throw new RuntimeException( "harness: \$wpdb->query not modelled: $sql" );
     }
     public function get_var( $q ) {
-        CF_TestState::$sql[] = $q['sql'];
-        if ( $q['sql'] === "SELECT option_value FROM {$this->options} WHERE option_name = %s" ) {
-            $v = CF_TestState::$db_options[ $q['args'][0] ] ?? null;
+        $this->last_error = '';
+        [ $sql, $a ] = self::split( $q );
+        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_var', $name, $a, $this ); }
+        CF_TestState::$sql[] = $sql;
+        if ( $sql === "SELECT option_value FROM {$this->options} WHERE option_name = %s" ) {
+            $v = CF_TestState::$db_options[ $a[0] ] ?? null;
             if ( $f = CF_TestState::$after_lock_read ) { CF_TestState::$after_lock_read = null; $f(); }
             return $v;
         }
-        throw new RuntimeException( "harness: \$wpdb->get_var not modelled: {$q['sql']}" );
+        throw new RuntimeException( "harness: \$wpdb->get_var not modelled: $sql" );
+    }
+    public function get_col( $q ) {
+        $this->last_error = '';
+        [ $sql, $a ] = self::split( $q );
+        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_col', $name, $a, $this ); }
+        throw new RuntimeException( "harness: \$wpdb->get_col not modelled: $sql" );
+    }
+    public function get_results( $q, $output = 'OBJECT' ) {
+        $this->last_error = '';
+        [ $sql, $a ] = self::split( $q );
+        if ( ARRAY_A !== $output ) { throw new RuntimeException( 'harness: get_results is modelled for ARRAY_A only' ); }
+        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_results', $name, $a, $this ); }
+        throw new RuntimeException( "harness: \$wpdb->get_results not modelled: $sql" );
     }
 }
 $GLOBALS['wpdb'] = new CF_Test_WPDB();
+require_once __DIR__ . '/support/catalogDb.php';
 
 // ── WooCommerce ──────────────────────────────────────────────────────────
 class WC_Order {

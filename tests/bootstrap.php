@@ -44,6 +44,16 @@ class CF_TestState {
     public static array $db_options = [];                    // the options TABLE the lock rows live in
     public static array $sql = [];                           // every statement $wpdb ran
     public static array $filters = [];       // hook => callbacks registered by add_filter
+    public static array $actions = [];        // hook => [ [callback, priority, accepted_args] ] — add_action
+    public static array $as_calls = [];       // every as_* call, in order
+    public static array $as_scheduled = [];   // hook => [ 'timestamp', 'group', 'priority' ]
+    public static array $posts = [];          // id => [ 'type', 'status', 'parent' ] — the wp_posts rows that matter
+    public static array $terms = [];          // term_id => (object) [ term_id, name, slug, taxonomy, count ]
+    public static ?string $terms_error = null; // set: get_terms answers WP_Error, as core does on a DB failure
+    public static array $attachments = [];    // attachment id => url
+    public static int   $cache_flushes = 0;
+    public static array $product_reads = [];  // every WC_Product getter read: [ prop, context ]
+    public static $on_product_get = null;     // callable( string $prop, WC_Product ): runs inside every getter
 
     public static function reset(): void {
         self::$orders = [];
@@ -62,11 +72,70 @@ class CF_TestState {
         self::$after_lock_read = null;
         self::$db_options = [];
         self::$sql = [];
+        self::$actions = [];
+        self::$as_calls = [];
+        self::$as_scheduled = [];
+        self::$posts = [];
+        self::$terms = [];
+        self::$terms_error = null;
+        self::$attachments = [];
+        self::$cache_flushes = 0;
+        self::$product_reads = [];
+        self::$on_product_get = null;
     }
 }
 
 // ── WordPress ────────────────────────────────────────────────────────────
-function add_action() {}
+function add_action( $hook, $cb = null, $prio = 10, $args = 1 ) { CF_TestState::$actions[ $hook ][] = [ $cb, $prio, $args ]; return true; }
+function get_post_type( $post = null ) { return CF_TestState::$posts[ (int) $post ]['type'] ?? false; }
+function wp_get_post_parent_id( $post = null ) { return (int) ( CF_TestState::$posts[ (int) $post ]['parent'] ?? 0 ); }
+function wp_get_attachment_url( $id = 0 ) { return CF_TestState::$attachments[ (int) $id ] ?? false; }
+function wp_cache_flush_runtime() { CF_TestState::$cache_flushes++; return true; }
+function delete_option( $k ) { unset( CF_TestState::$options[ $k ] ); return true; }
+
+/**
+ * get_terms, modelled on core for the arguments the catalogue passes. Core's
+ * hide_empty defaults to TRUE (a term with count 0 is hidden), and an EMPTY
+ * include means "no filter" — every term in the taxonomy. The second is refused
+ * here outright, so code that forgets to guard it fails in the harness.
+ */
+function get_terms( $args = [] ) {
+    if ( null !== CF_TestState::$terms_error ) { return new WP_Error( 'db_error', CF_TestState::$terms_error ); }
+    $include = array_map( 'intval', (array) ( $args['include'] ?? [] ) );
+    if ( ! $include ) { throw new RuntimeException( 'harness: get_terms without include returns every term in core — not modelled' ); }
+    $tax        = (string) ( $args['taxonomy'] ?? '' );
+    $hide_empty = $args['hide_empty'] ?? true;
+    $out = [];
+    foreach ( $include as $id ) {
+        $t = CF_TestState::$terms[ $id ] ?? null;
+        if ( ! $t || $t->taxonomy !== $tax ) { continue; }
+        if ( $hide_empty && 0 === (int) $t->count ) { continue; }
+        $out[] = $t;
+    }
+    if ( 'include' !== ( $args['orderby'] ?? 'name' ) ) {
+        usort( $out, function ( $a, $b ) { return strcmp( $a->name, $b->name ); } );
+    }
+    return $out;
+}
+
+// ── Action Scheduler (ships inside WooCommerce) ─────────────────────────
+// Recorded, including the priority: a LOWER number runs FIRST (default 10),
+// which is what keeps the order tick ahead of the catalogue job.
+function as_schedule_recurring_action( $timestamp, $interval, $hook, $args = [], $group = '', $unique = false, $priority = 10 ) {
+    CF_TestState::$as_calls[] = [ 'fn' => 'schedule', 'hook' => $hook, 'timestamp' => $timestamp, 'interval' => $interval,
+        'group' => $group, 'unique' => $unique, 'priority' => $priority ];
+    CF_TestState::$as_scheduled[ $hook ] = [ 'timestamp' => $timestamp, 'group' => $group, 'priority' => $priority ];
+    return count( CF_TestState::$as_calls );
+}
+function as_next_scheduled_action( $hook, $args = null, $group = '' ) {
+    $s = CF_TestState::$as_scheduled[ $hook ] ?? null;
+    if ( ! $s || ( '' !== $group && $s['group'] !== $group ) ) { return false; }
+    return $s['timestamp'];
+}
+function as_unschedule_all_actions( $hook, $args = [], $group = '' ) {
+    CF_TestState::$as_calls[] = [ 'fn' => 'unschedule_all', 'hook' => $hook, 'group' => $group ];
+    unset( CF_TestState::$as_scheduled[ $hook ] );
+}
 function add_filter( $hook, $cb = null, $prio = 10, $args = 1 ) { CF_TestState::$filters[ $hook ][] = $cb; return true; }
 function sanitize_text_field( $s ) { return trim( strip_tags( (string) $s ) ); }
 function wp_unslash( $v ) { return $v; }
@@ -231,10 +300,54 @@ class WC_Data_Exception extends Exception {
 class WC_REST_Exception extends WC_Data_Exception {}
 
 class WC_Product {
-    public function __construct( private int $id, private int $parent = 0, private string $status = 'publish' ) {}
+    /**
+     * What core's getters return in 'edit' context. The defaults are core's own
+     * for a new product (WC_Product::$data), so a test that sets nothing reads
+     * what a fresh product reads — never a convenient value.
+     */
+    private array $props;
+
+    // The first three parameters are unchanged: the order tests construct
+    // products as ( id ), ( id, parent ) and ( id, 0, 'trash' ).
+    public function __construct( private int $id, private int $parent = 0, private string $status = 'publish', array $props = [] ) {
+        $this->props = array_merge( [
+            'name' => '', 'sku' => '', 'type' => 'simple',
+            'regular_price' => '', 'sale_price' => '', 'price' => '',
+            'date_on_sale_from' => null, 'date_on_sale_to' => null,
+            'stock_quantity' => null, 'stock_status' => 'instock', 'manage_stock' => false,
+            'weight' => '', 'category_ids' => [], 'tag_ids' => [],
+            'image_id' => '', 'gallery_image_ids' => [], 'children' => [],
+        ], $props );
+    }
     public function get_id() { return $this->id; }
     public function get_parent_id() { return $this->parent; }
-    public function get_status() { return $this->status; }
+    public function get_status( $context = 'view' ) { CF_TestState::$product_reads[] = [ 'status', $context ]; return $this->status; }
+
+    private function read( string $prop, $context ) {
+        CF_TestState::$product_reads[] = [ $prop, $context ];
+        if ( CF_TestState::$on_product_get ) { ( CF_TestState::$on_product_get )( $prop, $this ); }
+        return $this->props[ $prop ];
+    }
+    public function get_name( $context = 'view' ) { return $this->read( 'name', $context ); }
+    public function get_sku( $context = 'view' ) { return $this->read( 'sku', $context ); }
+    public function get_regular_price( $context = 'view' ) { return $this->read( 'regular_price', $context ); }
+    public function get_sale_price( $context = 'view' ) { return $this->read( 'sale_price', $context ); }
+    public function get_price( $context = 'view' ) { return $this->read( 'price', $context ); }
+    public function get_date_on_sale_from( $context = 'view' ) { return $this->read( 'date_on_sale_from', $context ); }
+    public function get_date_on_sale_to( $context = 'view' ) { return $this->read( 'date_on_sale_to', $context ); }
+    public function get_stock_quantity( $context = 'view' ) { return $this->read( 'stock_quantity', $context ); }
+    public function get_stock_status( $context = 'view' ) { return $this->read( 'stock_status', $context ); }
+    public function get_manage_stock( $context = 'view' ) { return $this->read( 'manage_stock', $context ); }
+    public function get_weight( $context = 'view' ) { return $this->read( 'weight', $context ); }
+    public function get_category_ids( $context = 'view' ) { return $this->read( 'category_ids', $context ); }
+    public function get_tag_ids( $context = 'view' ) { return $this->read( 'tag_ids', $context ); }
+    public function get_image_id( $context = 'view' ) { return $this->read( 'image_id', $context ); }
+    public function get_gallery_image_ids( $context = 'view' ) { return $this->read( 'gallery_image_ids', $context ); }
+    // Core's WC_Product_Variable::get_children( $visible_only = '' ) takes no
+    // context (a string is ignored), so it is called with no argument.
+    public function get_children() { return $this->read( 'children', null ); }
+    public function get_type() { return $this->props['type']; }
+    public function is_type( $type ) { return in_array( $this->props['type'], (array) $type, true ); }
 }
 /** Like core: false for an id that is not a product. Never invents one. */
 function wc_get_product( $id ) { return CF_TestState::$products[ (int) $id ] ?? false; }

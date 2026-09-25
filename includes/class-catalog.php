@@ -180,12 +180,18 @@ class CashFlow_Catalog {
         }
         $n = $wpdb->query( $wpdb->prepare( self::sql( 'insert' ),
             [ $product_id, $reason, self::db_time(), $product_id . ':' . $reason ] ) );
+        if ( false === $n ) {
+            self::note_error( 'The catalogue queue could not be written: ' . $wpdb->last_error );
+        }
         return false !== $n;
     }
 
     /**
      * Take up to $limit due rows under $token. [] when nothing is due; null when
      * the database failed — a failure must never read as "the queue is empty".
+     * A row can be claimed by the UPDATE and still be unreadable (the read-back
+     * fails, or answers fewer rows than were just claimed): that is a database
+     * failure too, never an empty result standing in for what the update did.
      */
     public static function claim( $token, $limit, $real_only ) {
         global $wpdb;
@@ -200,34 +206,57 @@ class CashFlow_Catalog {
             return [];
         }
         $rows = $wpdb->get_results( $wpdb->prepare( self::sql( 'select_claimed' ), [ $token ] ), ARRAY_A );
-        return is_array( $rows ) ? $rows : [];
+        if ( '' !== (string) $wpdb->last_error || ! is_array( $rows ) || ! $rows ) {
+            self::note_error( 'The catalogue queue could not be read: ' . $wpdb->last_error );
+            return null;
+        }
+        return $rows;
     }
 
     /** Sent: delete exactly this row, and only with its own token. */
     public static function done_row( array $row, $token ) {
         global $wpdb;
-        $wpdb->query( $wpdb->prepare( self::sql( 'done' ), [ (int) $row['id'], $token ] ) );
+        $n = $wpdb->query( $wpdb->prepare( self::sql( 'done' ), [ (int) $row['id'], $token ] ) );
+        if ( false === $n ) {
+            self::note_error( 'The catalogue queue could not be updated: ' . $wpdb->last_error );
+        }
     }
 
     /** Not tried this run (the budget ran out, the server said stop, it did not fit): back, no try counted. */
     public static function release_row( array $row, $token ) {
         global $wpdb;
         $n = $wpdb->query( $wpdb->prepare( self::sql( 'release_untried' ), [ (int) $row['id'], $token ] ) );
+        if ( false === $n ) {
+            // Recorded, deliberately left otherwise alone: the row's token and
+            // claimed_at are UNCHANGED by a failed write, so it is neither lost
+            // nor double-freed — it becomes claimable again once its lease
+            // expires, the same as a run that died outright.
+            self::note_error( 'The catalogue queue could not be updated: ' . $wpdb->last_error );
+            return;
+        }
         if ( 0 === $n ) {
             self::done_row( $row, $token );   // a newer waiting row for this product carries the change
         }
     }
 
-    /** Tried and failed: once more on the next run, or parked on the MAX_ATTEMPTS-th failure. */
+    /**
+     * Tried and failed: once more on the next run, or parked on the
+     * MAX_ATTEMPTS-th failure. 'error' — a name the brief has none for — is a
+     * database failure on either write: never reported as 'released' (the row
+     * was NOT rearmed) or 'parked' (park_row's own write may not have landed).
+     */
     public static function fail_row( array $row, $token ) {
         global $wpdb;
         $attempts = (int) $row['attempts'] + 1;
         if ( $attempts >= self::MAX_ATTEMPTS ) {
-            self::park_row( $row, $token, $attempts );
-            return 'parked';
+            return self::park_row( $row, $token, $attempts ) ? 'parked' : 'error';
         }
         $n = $wpdb->query( $wpdb->prepare( self::sql( 'release_failed' ),
             [ self::db_time( self::RETRY_SECONDS ), (int) $row['id'], $token ] ) );
+        if ( false === $n ) {
+            self::note_error( 'The catalogue queue could not be updated: ' . $wpdb->last_error );
+            return 'error';
+        }
         if ( 0 === $n ) {
             // UPDATE IGNORE skipped it: a newer save of the same product took the
             // pending_key while this row was out. That row carries the change (the
@@ -238,9 +267,15 @@ class CashFlow_Catalog {
         return 'released';
     }
 
+    /** true only when the row was actually parked — fail_row's only way to know. */
     public static function park_row( array $row, $token, $attempts ) {
         global $wpdb;
-        $wpdb->query( $wpdb->prepare( self::sql( 'park' ), [ (int) $attempts, self::db_time(), (int) $row['id'], $token ] ) );
+        $n = $wpdb->query( $wpdb->prepare( self::sql( 'park' ), [ (int) $attempts, self::db_time(), (int) $row['id'], $token ] ) );
+        if ( false === $n ) {
+            self::note_error( 'The catalogue queue could not be updated: ' . $wpdb->last_error );
+            return false;
+        }
+        return $n > 0;
     }
 
     /** A product sent successfully is no longer a parked problem. */

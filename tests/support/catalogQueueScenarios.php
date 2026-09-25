@@ -85,6 +85,16 @@ function cf_queue_scenarios( array $env ): void {
     $again = CashFlow_Catalog::claim( 'tu2', 25, false );
     ok( 'an untried row is claimable again at once, no try counted', count( (array) $again ) === 1 && 0 === (int) $first( $again )['attempts'] );
 
+    echo "── releasing an untried row whose product was saved again meanwhile also gives way\n";
+    $env['reset']();
+    CashFlow_Catalog::enqueue( 20, 'save' );
+    $r = CashFlow_Catalog::claim( 'ts1', 25, false );
+    CashFlow_Catalog::enqueue( 20, 'save' );                  // a newer save while the claim sits untried
+    CashFlow_Catalog::release_row( $first( $r ), 'ts1' );
+    $left = $env['rows']();
+    ok( 'the stale claim is discarded, the newer save kept', count( $left ) === 1 && null === $left[0]['token'] );
+    ok( 'and it carries no attempt for the discarded claim', 0 === (int) $left[0]['attempts'] );
+
     echo "── a claim held by a run that died is taken back after the lease\n";
     $env['reset']();
     CashFlow_Catalog::enqueue( 13, 'save' );

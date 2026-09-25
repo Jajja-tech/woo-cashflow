@@ -200,16 +200,28 @@ ok( 'both rows are gone — done together, not just one of them', CF_TestState::
 echo "── the same double row, but the send fails: failed together, neither lost nor duplicated\n";
 store();
 product( 501 );
+product( 502 );   // company [IMPORTANT 1]: without something else going through the same run, an isolated 500 is an outage, never a counted try
 CF_TestState::$catalog_queue[90] = [ 'id' => '90', 'product_id' => '501', 'reason' => 'save', 'token' => 'dead-run-token',
     'attempts' => '1', 'queued_at' => '2026-09-20 00:00:00', 'claimed_at' => '2020-01-01 00:00:00', 'retry_at' => null,
     'parked_at' => null, 'pending_key' => null ];
 CF_TestState::$catalog_queue[91] = [ 'id' => '91', 'product_id' => '501', 'reason' => 'save', 'token' => null,
     'attempts' => '0', 'queued_at' => '2026-09-20 00:00:01', 'claimed_at' => null, 'retry_at' => null,
     'parked_at' => null, 'pending_key' => '501:save' ];
-CF_TestState::$catalog_queue_next = 92;
-CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 500, 'error' => 'boom', 'data' => [ 'error' => 'catalogue_write_failed' ] ];
+CF_TestState::$catalog_queue[92] = [ 'id' => '92', 'product_id' => '502', 'reason' => 'save', 'token' => null,
+    'attempts' => '0', 'queued_at' => '2026-09-20 00:00:02', 'claimed_at' => null, 'retry_at' => null,
+    'parked_at' => null, 'pending_key' => '502:save' ];
+CF_TestState::$catalog_queue_next = 93;
+for ( $i = 0; $i < 5; $i++ ) {
+    CF_TestState::$api_responses['/plugin/catalog/products'][] = function ( $call ) {
+        $ids = array_column( json_decode( $call['body'], true )['products'] ?? [], 'id' );
+        return in_array( 501, $ids, true )
+            ? [ 'ok' => false, 'status' => 500, 'error' => 'boom', 'data' => [ 'error' => 'catalogue_write_failed' ] ]
+            : [ 'ok' => true, 'status' => 200, 'data' => [ 'applied' => [], 'trashed' => [], 'unchanged' => [], 'list_wanted' => false ] ];
+    };
+}
 run_job();
-ok( 'exactly one send was attempted for the one product', count( sent() ) === 1 );
+ok( 'the failing product was isolated down to its own request', in_array( [ 501 ], array_map( function ( $c ) { return ids_in( $c ); }, sent() ), true ) );
+ok( 'the company product went through', [] === array_filter( CF_TestState::$catalog_queue, function ( $r ) { return '502' === $r['product_id']; } ) );
 // A 500 on a single-product body is a try against THAT product [wire-contract.md:
 // "500 … Keep the queue rows, attempts+1, retry next run"], counted via
 // fail_row() on every row in the group — not the untried release a stop uses.

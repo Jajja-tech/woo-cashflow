@@ -100,7 +100,11 @@ ok( 'the panel names the product and the server\'s reason', str_contains( (strin
 echo "── it parks on the 5th failed try, and stops being sent\n";
 for ( $run = 2; $run <= 5; $run++ ) {
     $T += 61;
-    respond( 1, $poison );
+    // A companion product each run [IMPORTANT 1]: an isolated retry with
+    // NOTHING else going through the same run would read as an outage, not
+    // this product's own fault, and never count a try at all.
+    saves( [ 3900 + $run ] );
+    respond( 5, $poison );
     run_job();
 }
 ok( 'after 5 tries it is parked', null !== row_of( 3003 ) && null !== row_of( 3003 )['parked_at'] && '5' === row_of( 3003 )['attempts'] );
@@ -110,12 +114,33 @@ $T += 61;
 run_job();
 ok( 'a parked product is not sent again', count( CF_TestState::$api_calls ) === $before );
 
-echo "── 400 (a malformed envelope) is split and counted the same way\n";
+// The "500 on one product" test above IS the mixed case [IMPORTANT 1]: other
+// products go through first, corroborating the poison as ITS OWN fault
+// rather than an outage — that is why it alone counts a try.
+echo "── IMPORTANT 1: a fast 500 for EVERYONE parks nothing, over many runs, and shows the outage\n";
 store();
-saves( [ 4001 ] );
+saves( range( 9001, 9060 ) );   // 60 real saves, nobody spared
+respond( 400, function () { return err( 500, [ 'error' => 'catalogue_write_failed' ] ); } );   // fails for every single one of them, fast
+for ( $pass = 1; $pass <= 3; $pass++ ) {
+    run_job();
+}
+$touched = array_filter( CF_TestState::$catalog_queue, function ( $r ) { return '0' !== $r['attempts'] || null !== $r['parked_at']; } );
+ok( 'nothing ever corroborated any one product, so nothing ever counted a try', [] === $touched, count( $touched ) . ' rows touched' );
+ok( 'all 60 are still pending, none lost, none parked', count( CF_TestState::$catalog_queue ) === 60 );
+ok( 'the panel names it an outage, not a per-product failure',
+    str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'outage' )
+    && str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'nothing went through this run' ) );
+
+echo "── a 400 (a malformed envelope) is NEVER split — every row costs one try, in ONE request [IMPORTANT 2]\n";
+store();
+saves( [ 4001, 4002, 4003, 4004 ] );
 respond( 1, function () { return err( 400, [ 'error' => 'products_must_be_an_array' ] ); } );
 run_job();
-ok( 'one try counted', '1' === ( row_of( 4001 )['attempts'] ?? null ) );
+ok( 'exactly one request for the whole batch of 4 — never 2n-1', count( bodies() ) === 1, count( bodies() ) . ' requests' );
+ok( 'every row in the body counted a try directly, none split off on its own',
+    '1' === ( row_of( 4001 )['attempts'] ?? null ) && '1' === ( row_of( 4002 )['attempts'] ?? null )
+    && '1' === ( row_of( 4003 )['attempts'] ?? null ) && '1' === ( row_of( 4004 )['attempts'] ?? null ) );
+ok( 'noted once, the run then stops', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'Sending products failed' ) );
 
 echo "── a stop is nobody's try\n";
 $stops = [
@@ -130,7 +155,7 @@ $stops = [
 foreach ( $stops as $name => $answer ) {
     store();
     saves( [ 5001, 5002 ] );
-    respond( 3, function () use ( $answer ) { return $answer; } );
+    respond( 1, function () use ( $answer ) { return $answer; } );   // a stop never issues a second request this run
     run_job();
     $rows = array_values( CF_TestState::$catalog_queue );
     ok( "$name: one request, then the run ends", count( bodies() ) === 1, count( bodies() ) . ' requests' );
@@ -184,11 +209,61 @@ respond( 2, function () { return ok200(); }, 8.0 );
 run_job();
 ok( 'split once, second half never started (9 s left)', bodies() === [ [ 7001, 7002, 7003, 7004 ], [ 7001, 7002 ] ], json_encode( bodies() ) );
 ok( 'the second half is back with no try counted', '0' === ( row_of( 7003 )['attempts'] ?? null ) && '0' === ( row_of( 7004 )['attempts'] ?? null ) );
+ok( 'a budget cutoff — not any refusal — puts the untouched ids on the solo list [CRITICAL]', [ 7003, 7004 ] === CashFlow_Catalog::solo_ids() );
+ok( 'and it is noted, at the very first run it happens', str_contains( (string) CashFlow_Catalog::stats()['last_error'], '2 products will be sent one at a time' ) );
+
+echo "── CRITICAL: a slow server + one poison product must never restart the same split forever with nothing counted\n";
+store();
+saves( range( 2001, 2025 ) );   // 25 real saves, one of them poisoned
+$poison_id = 2025;
+for ( $i = 0; $i < 400; $i++ ) {
+    CF_TestState::$api_responses['/plugin/catalog/products'][] = function ( $call ) use ( $poison_id ) {
+        global $T;
+        $body       = json_decode( $call['body'], true );
+        $has_poison = in_array( $poison_id, array_column( $body['products'] ?? [], 'id' ), true );
+        if ( $has_poison ) {
+            $T += 4.0;   // "about 2 s or more per 500" [CRITICAL]
+            return err( 500, [ 'error' => 'catalogue_write_failed' ] );
+        }
+        return ok200();
+    };
+}
+run_job();   // RUN 1
+ok( 'a panel note appears at the very first run', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'will be sent one at a time' ) );
+ok( 'the split made real progress even though it was cut short — not everything released untried', count( CF_TestState::$catalog_queue ) < 25, count( CF_TestState::$catalog_queue ) . ' left' );
+$left_ids = array_map( 'intval', array_column( CF_TestState::$catalog_queue, 'product_id' ) );
+sort( $left_ids );
+$solo1 = CashFlow_Catalog::solo_ids();
+sort( $solo1 );
+ok( 'whatever is left is exactly what the solo list now holds', $left_ids === $solo1, json_encode( $left_ids ) . ' vs ' . json_encode( $solo1 ) );
+
+saves( [ 2100 ] );   // a newer save, arriving while the poison product is still being untangled
+$T += 61;
+run_job();   // RUN 2 — drains the solo list one at a time; the two survivors sent alongside the poison corroborate its first counted try; the newer save goes through too
+
+for ( $run = 3; $run <= 9; $run++ ) {
+    $T += 61;
+    // Company again [IMPORTANT 1]: once isolated, the poison product alone
+    // has nothing to corroborate a fault as ITS OWN, and would otherwise
+    // read as an outage forever, exactly like the earlier parking test.
+    saves( [ 2100 + $run ] );
+    run_job();
+}
+ok( 'the poison product parks after its tries', null !== row_of( $poison_id ) && null !== row_of( $poison_id )['parked_at']
+    && '5' === row_of( $poison_id )['attempts'] );
+ok( 'the other 24 of the original 25 all went through', [] === array_filter( range( 2001, 2024 ), function ( $id ) { return null !== row_of( $id ); } ) );
+ok( 'the newer save also went through', null === row_of( 2100 ) );
+ok( 'the solo list is empty again, nothing left waiting on one-at-a-time treatment', [] === CashFlow_Catalog::solo_ids() );
 
 echo "── a database failure while recording a try is the panel's last word, not overwritten by the send failure\n";
 store();
-saves( [ 8001 ] );
-respond( 1, function () { return err( 500, [ 'error' => 'catalogue_write_failed' ] ); } );
+// 8000 is company [IMPORTANT 1]: with nothing else through this run, this
+// would be decided as an outage before fail_row ever ran at all.
+saves( [ 8000, 8001 ] );
+respond( 5, function ( $body ) {
+    return in_array( 8001, array_column( $body['products'] ?? [], 'id' ), true )
+        ? err( 500, [ 'error' => 'catalogue_write_failed' ] ) : ok200();
+} );
 CF_TestState::$db_error_on = 'attempts = attempts + 1, token = NULL';   // release_failed only
 run_job();
 CF_TestState::$db_error_on = null;
@@ -196,20 +271,29 @@ ok( 'the row is untouched by the failed write — still claimed, not lost', 1 ==
 ok( 'the panel keeps the database failure as the last word', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'catalogue queue could not be updated' ) );
 ok( 'the send failure never overwrote it', ! str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'Sending product 8001' ) );
 
-echo "── post() refuses a body that was not pre-encoded; it never lets wp_json_encode re-encode it\n";
+echo "── post()'s non-string guard is a SAFEGUARD for a path production never takes — pack()/products_body() always hand it an already-encoded string\n";
 store();
 $ref_post = new ReflectionMethod( 'CashFlow_Catalog', 'post' );
 $before_calls = count( CF_TestState::$api_calls );
 $res = $ref_post->invoke( new CashFlow_Catalog(), 'secret-xyz', CashFlow_Catalog::EP_PRODUCTS, [ 'not' => 'a string' ] );
-ok( 'a non-string body is refused before it ever reaches the network', false === $res['ok'] && count( CF_TestState::$api_calls ) === $before_calls );
+ok( 'if it ever were reached, it would refuse before the network, not let wp_json_encode re-encode it', false === $res['ok'] && count( CF_TestState::$api_calls ) === $before_calls );
 ok( 'and it is recorded on the panel', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'not a pre-encoded string' ) );
 
 echo "── classify() is the wire's table\n";
 $shape = [ 'applied' => [], 'trashed' => [], 'unchanged' => [] ];
-$c = function ( $code ) use ( $shape ) {
-    return CashFlow_Catalog::classify( [ 'ok' => $code >= 200 && $code < 300, 'status' => $code, 'data' => $shape ] );
+$c = function ( $code, $data = null ) use ( $shape ) {
+    return CashFlow_Catalog::classify( [ 'ok' => $code >= 200 && $code < 300, 'status' => $code, 'data' => $data ?? $shape ] );
 };
-ok( '2xx ok (with a real contract body); 400/413/500 split', $c( 200 ) === 'ok' && $c( 400 ) === 'split' && $c( 413 ) === 'split' && $c( 500 ) === 'split' );
+ok( '2xx ok (with a real contract body)', $c( 200 ) === 'ok' );
+ok( '400 is never split — a malformed envelope, its own outcome [IMPORTANT 2]', $c( 400, [ 'error' => 'products_must_be_an_array' ] ) === 'malformed' );
+ok( '413 splits regardless of body', $c( 413 ) === 'split' );
+ok( '500 splits ONLY when data.error is one of the three catalogue codes the wire names [IMPORTANT 1]',
+    $c( 500, [ 'error' => 'catalogue_write_failed' ] ) === 'split'
+    && $c( 500, [ 'error' => 'catalogue_list_failed' ] ) === 'split'
+    && $c( 500, [ 'error' => 'catalogue_check_failed' ] ) === 'split'
+    && $c( 500, [ 'error' => 'something_else' ] ) === 'stop'
+    && $c( 500, null ) === 'stop'
+    && $c( 500, '<html>server error</html>' ) === 'stop' );
 ok( 'everything else stops', $c( 0 ) === 'stop' && $c( 401 ) === 'stop' && $c( 403 ) === 'stop' && $c( 404 ) === 'stop'
     && $c( 409 ) === 'stop' && $c( 429 ) === 'stop' && $c( 502 ) === 'stop' && $c( 503 ) === 'stop' && $c( 504 ) === 'stop' );
 ok( 'a 2xx without the contract\'s shape is a stop, not ok — the status alone never decides success',

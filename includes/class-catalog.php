@@ -43,6 +43,17 @@ class CashFlow_Catalog {
     const MAX_PRODUCTS   = 25;      // rows per claim, so products AND removals per body stay within the server's 25 / 100
     const MAX_BODY_BYTES = 81920;   // 80 KB, measured on the encoded body; the server's JSON parser takes 100 kB
     const LIST_OPTION    = 'cashflow_catalog_list';
+    /**
+     * Ids a SPLIT left unsent because the run's budget ran out mid-recursion
+     * [CRITICAL, review-3]. Without this, a slow server plus one poisoned
+     * product among many restarts the same large split from scratch every
+     * run, always runs out of budget before isolating the failure, and
+     * releases the whole batch untried forever — no try is ever counted, no
+     * progress is ever made. The next run drains this list ONE PRODUCT AT A
+     * TIME, before any batch, so a single slow product can never again cost
+     * the whole batch its budget. At most MAX_PRODUCTS ids.
+     */
+    const SOLO_OPTION    = 'cashflow_catalog_solo';
 
     /** Every statement sql() can build. The test harness matches on these. */
     const SQL_NAMES = [
@@ -96,6 +107,37 @@ class CashFlow_Catalog {
 
     /** When this run must stop starting requests by (seconds, from now()). */
     private $deadline = 0.0;
+
+    /**
+     * Set true the instant this run's budget cuts a split short (the top of
+     * send_split() finds !can_start()). Once true, every sibling this run
+     * releases untried because of it is ALSO a candidate for the solo list —
+     * distinguishing "ran out of time" from an ordinary wire-level stop
+     * (401/403/…), which releases untried too but is never a budget problem
+     * and must never feed the solo list. A fresh instance per tick(), so this
+     * never leaks between runs.
+     */
+    private $budget_exhausted = false;
+    /** Product ids released untried by a budget cutoff this run; see above. */
+    private $cut_short_ids = [];
+    /**
+     * True the moment ANY product has been sent successfully this run
+     * [IMPORTANT 1]. Whether an isolated single-product 500 counts a try
+     * depends on this — but ONLY its value at the very END of the run, never
+     * at the moment the 500 is seen: a single-entry 500 is deferred into
+     * $pending_500_singles instead of being decided on the spot, precisely
+     * because send_split() explores its "first" half before its "second" —
+     * deciding immediately would mean a poisoned product with the LOWEST id
+     * (always tried first) could never be corroborated by a later success in
+     * the very same run, no matter how many other products also went through.
+     */
+    private $any_ok_this_run = false;
+    /**
+     * Single-product 500s not yet resolved: each `{entries, token, res}`,
+     * left claimed (never released, never fail_row'd) until run() decides
+     * them ALL at once against the run's final $any_ok_this_run. [IMPORTANT 1]
+     */
+    private $pending_500_singles = [];
 
     public function __construct() {
         // Constructed inside plugins_loaded (CashFlow_Plugin::init). A plugin
@@ -708,6 +750,47 @@ class CashFlow_Catalog {
         $this->deadline = self::now() + self::BUDGET_SECONDS;
         self::update_stats( [ 'table_missing' => false, 'last_run_at' => self::now_iso() ] );
         $this->work( $secret );
+        $this->resolve_pending_500_singles();
+        // [CRITICAL, review-3] Whatever a budget cutoff left unsent THIS run
+        // goes onto the solo list, noted at the moment it happens — not
+        // silently carried forward with nothing on the panel to show for it.
+        if ( $this->budget_exhausted && $this->cut_short_ids ) {
+            self::add_to_solo( $this->cut_short_ids );
+            self::note_error( 'CashFlow refused a batch; ' . count( self::solo_ids() ) . ' products will be sent one at a time' );
+        }
+    }
+
+    /**
+     * Every single-product 500 deferred this run [IMPORTANT 1], decided
+     * together against the run's FINAL $any_ok_this_run: if anything else
+     * went through, each one's try is counted (and parked on the
+     * MAX_ATTEMPTS-th) exactly as an ordinary split failure would; if
+     * NOTHING went through anywhere in the run, every one of them is an
+     * outage — released untried, no try counted, noted once. Must run
+     * whatever way work() ended (budget, a wire stop, or completion): a
+     * deferred row is left CLAIMED, and an unresolved one would sit
+     * unreachable for a whole LEASE_SECONDS before anything could reclaim it.
+     */
+    private function resolve_pending_500_singles() {
+        if ( ! $this->pending_500_singles ) {
+            return;
+        }
+        if ( $this->any_ok_this_run ) {
+            foreach ( $this->pending_500_singles as $p ) {
+                $outcome = self::fail_all( $p['entries'], $p['token'] );
+                if ( ! $outcome['any_error'] ) {
+                    self::note_failure( 'Sending product ' . $p['entries'][0]['id']
+                        . ( $outcome['any_parked'] ? ' (parked after ' . self::MAX_ATTEMPTS . ' tries)' : '' ), $p['res'] );
+                }
+            }
+            return;
+        }
+        foreach ( $this->pending_500_singles as $p ) {
+            self::release_entries( $p['entries'], $p['token'] );
+        }
+        $ids = implode( ', ', array_map( function ( $p ) { return $p['entries'][0]['id']; }, $this->pending_500_singles ) );
+        self::note_error( 'Sending product(s) ' . $ids . ' failed: ' . self::describe_connection_refusal( $this->pending_500_singles[0]['res'] )
+            . ' — nothing went through this run, an outage rather than any one product, no try counted' );
     }
 
     /** No request starts with less than MIN_LEFT_TO_START seconds of this run's budget left. */
@@ -716,6 +799,12 @@ class CashFlow_Catalog {
     }
 
     private function work( $secret ) {
+        // Ids a PRIOR run's budget cut short, one at a time, before any batch
+        // [CRITICAL, review-3] — never let one of them ride a large batch
+        // again this run, or the same timeout can repeat.
+        if ( 'stop' === $this->drain_solo( $secret ) ) {
+            return;
+        }
         // Real saves first [review-2], until none is due or the run must stop.
         while ( true ) {
             $d = $this->drain( $secret, true );
@@ -761,6 +850,49 @@ class CashFlow_Catalog {
         list( $fit, $rest, $body ) = self::pack( $entries );
         self::release_entries( $rest, $token );          // did not fit: the next claim takes them, no try counted
         return 'stop' === $this->send_split( $secret, $fit, $token, $body ) ? 'stop' : 'sent';
+    }
+
+    /**
+     * Ids the solo list still holds, one row at a time — never a batch, so a
+     * repeat of the same product can never again cost a whole batch its
+     * budget [CRITICAL, review-3]. 'stop': a wire-level refusal (not a
+     * budget cutoff) — end the whole run, same as any other stop. 'sent':
+     * the list is drained, empty, or the budget ran out here too (its
+     * remaining ids simply stay on the list — nothing more to persist, since
+     * they were never removed).
+     */
+    private function drain_solo( $secret ) {
+        while ( self::solo_ids() && $this->can_start() ) {
+            $token = bin2hex( random_bytes( 16 ) );
+            $rows  = self::claim( $token, 1, true );
+            if ( null === $rows ) {
+                return 'stop';   // the queue could not be read; noted by claim()
+            }
+            if ( ! $rows ) {
+                break;   // nothing real is due right now
+            }
+            $id = (int) $rows[0]['product_id'];
+            if ( (int) $rows[0]['attempts'] >= self::MAX_ATTEMPTS ) {
+                self::park_row( $rows[0], $token, (int) $rows[0]['attempts'] );
+                self::remove_solo_id( $id );   // resolved — parked, not merely tried
+                continue;
+            }
+            $entries = $this->entries_for( $rows, $token );
+            if ( ! $entries ) {
+                self::remove_solo_id( $id );   // handled inside entries_for() already (done, or its own try counted)
+                continue;
+            }
+            $body   = self::encode( self::products_body( $entries ) );
+            $result = $this->send_split( $secret, $entries, $token, $body );
+            if ( 'stop' === $result ) {
+                // A budget cutoff here is not a wire-level stop: the id stays
+                // on the list (send_split() never removed it) for next run;
+                // anything else is a genuine refusal — end the whole run.
+                return $this->budget_exhausted ? 'sent' : 'stop';
+            }
+            self::remove_solo_id( $id );   // sent (ok), or its try was counted (failed/outage) — either way, resolved
+        }
+        return 'sent';
     }
 
     /** One entry per product id: the product as it is NOW, or a removal if it is gone. */
@@ -885,40 +1017,87 @@ class CashFlow_Catalog {
         return true;
     }
 
+    /** One of the three codes the wire promises means a 500 is the server's OWN fault [IMPORTANT 1]. */
+    private static function is_catalogue_fault( array $res ) {
+        $data  = is_array( $res['data'] ?? null ) ? $res['data'] : [];
+        $error = is_string( $data['error'] ?? null ) ? $data['error'] : '';
+        return in_array( $error, [ 'catalogue_write_failed', 'catalogue_list_failed', 'catalogue_check_failed' ], true );
+    }
+
     /**
      * What an answer means for the rows in the body — the wire's refusal table
      * [wire-contract.md, "Refusals common to all three routes"]:
-     *   'ok'    A 2xx carrying the contract's shape (has_shape()). A 2xx that
-     *           does NOT carry it is never "nothing was written" — it is
-     *           treated the same as a stop: released untried, never deleted
-     *           on an assumption.
-     *   'split' 400, 413, 500: something in THIS body was refused or broke the
-     *           write. Split it; a single product that still fails counts a try.
-     *   'stop'  401, 403, 404, 409, 429, 502–504, a transport failure, anything
-     *           else (including a 2xx with the wrong shape): not the rows'
-     *           fault. End the run, count no try.
+     *   'ok'        A 2xx carrying the contract's shape (has_shape()). A 2xx
+     *               that does NOT carry it is never "nothing was written" —
+     *               it is treated the same as a stop: released untried,
+     *               never deleted on an assumption.
+     *   'malformed' 400: a malformed ENVELOPE, a plugin bug, never a
+     *               per-product fault [IMPORTANT 2]. Never split — every
+     *               half would carry the identical envelope. Every row in
+     *               THIS body counts a try directly.
+     *   'split'     413, or a 500 whose data.error is one of the three
+     *               catalogue codes the wire promises [IMPORTANT 1] — an
+     *               unrecognised 500 (an HTML body, data === null, any other
+     *               5xx) is never assumed to be the server's fault and is a
+     *               stop instead. Split; a single product that still fails
+     *               counts a try — UNLESS it is a 500 and nothing else has
+     *               gone through this run, which is an outage, not this
+     *               product's fault (see send_split()).
+     *   'stop'      401, 403, 404, 409, 429, an unrecognised 5xx, a
+     *               transport failure, anything else (including a 2xx with
+     *               the wrong shape): not the rows' fault. End the run,
+     *               count no try.
      */
     public static function classify( array $res ) {
         $code = (int) ( $res['status'] ?? 0 );
         if ( ! empty( $res['ok'] ) && $code >= 200 && $code < 300 ) {
             return self::has_shape( $res['data'] ?? null, [ 'applied', 'trashed', 'unchanged' ] ) ? 'ok' : 'stop';
         }
-        if ( in_array( $code, [ 400, 413, 500 ], true ) ) {
+        if ( 400 === $code ) {
+            return 'malformed';
+        }
+        if ( 413 === $code ) {
+            return 'split';
+        }
+        if ( 500 === $code && self::is_catalogue_fault( $res ) ) {
             return 'split';
         }
         return 'stop';
     }
 
+    /** fail_row() on every row of every entry; true across all of them, never just the last row seen [minor 1]. */
+    private static function fail_all( array $entries, $token ) {
+        $any_error  = false;
+        $any_parked = false;
+        foreach ( $entries as $e ) {
+            foreach ( $e['rows'] as $row ) {
+                $outcome = self::fail_row( $row, $token );
+                if ( 'error' === $outcome ) { $any_error = true; }
+                if ( 'parked' === $outcome ) { $any_parked = true; }
+            }
+        }
+        return [ 'any_error' => $any_error, 'any_parked' => $any_parked ];
+    }
+
     /**
-     * Send; on a refusal of the BODY (400/413/500), split it and send each
-     * half; a SINGLE product that still fails counts a try (parked on the
-     * MAX_ATTEMPTS-th). A stop ends the run with no try counted against
+     * Send; on a refusal of the BODY, split it (413, or a recognised 500) and
+     * send each half; a SINGLE product that still fails counts a try (parked
+     * on the MAX_ATTEMPTS-th) — unless it is an isolated 500 with nothing
+     * else through this run, an outage rather than this product's fault
+     * [IMPORTANT 1]. A 400 counts every row in THIS body directly, never
+     * split [IMPORTANT 2]. A stop ends the run with no try counted against
      * anyone. [NB7] $body is the ENCODED string pack() measured for $entries;
      * a split re-encodes each half the same way (products_body() + encode()),
      * so the bytes sent always match the entries they were measured from.
      */
     private function send_split( $secret, array $entries, $token, $body ) {
         if ( ! $this->can_start() ) {
+            // [CRITICAL, review-3] Not the rows' fault, but neither is it an
+            // ordinary stop: THESE ids are exactly what the solo list exists
+            // to remember, so a slow server never restarts this same split
+            // from scratch, forever, without a single try ever landing.
+            $this->budget_exhausted = true;
+            $this->cut_short_ids    = array_merge( $this->cut_short_ids, array_column( $entries, 'id' ) );
             self::release_entries( $entries, $token );
             return 'stop';
         }
@@ -927,6 +1106,14 @@ class CashFlow_Catalog {
         if ( 'ok' === $class ) {
             $this->on_products_ok( $entries, $token, $res['data'] );
             return 'ok';
+        }
+        if ( 'malformed' === $class ) {
+            $outcome = self::fail_all( $entries, $token );
+            if ( ! $outcome['any_error'] ) {
+                self::note_failure( 'Sending products'
+                    . ( $outcome['any_parked'] ? ' (some parked after ' . self::MAX_ATTEMPTS . ' tries)' : '' ), $res );
+            }
+            return 'stop';
         }
         if ( 'stop' === $class ) {
             self::release_entries( $entries, $token );
@@ -943,16 +1130,25 @@ class CashFlow_Catalog {
         }
         // 'split': the body itself was refused, not any one product by name.
         if ( 1 === count( $entries ) ) {
-            $outcome = '';
-            foreach ( $entries[0]['rows'] as $row ) {
-                $outcome = self::fail_row( $row, $token );
+            if ( 500 === (int) ( $res['status'] ?? 0 ) ) {
+                // [IMPORTANT 1] Whether this is the product's own fault or an
+                // outage depends on whether ANYTHING ELSE goes through this
+                // run — which is not yet known: "first" is always explored
+                // before "second", so deciding NOW would mean whichever
+                // product happens to sort lowest could never be corroborated
+                // by a sibling that hasn't been tried yet. Leave the row
+                // CLAIMED (neither released nor fail_row'd) and decide every
+                // pending single together, once, at the end of the run.
+                $this->pending_500_singles[] = [ 'entries' => $entries, 'token' => $token, 'res' => $res ];
+                return 'failed';
             }
-            if ( 'error' !== $outcome ) {
+            $outcome = self::fail_all( $entries, $token );
+            if ( ! $outcome['any_error'] ) {
                 // 'error' means fail_row's own database write failed and
                 // already recorded THAT failure; a live database failure
                 // outranks a send failure and must stay the panel's last word.
                 self::note_failure( 'Sending product ' . $entries[0]['id']
-                    . ( 'parked' === $outcome ? ' (parked after ' . self::MAX_ATTEMPTS . ' tries)' : '' ), $res );
+                    . ( $outcome['any_parked'] ? ' (parked after ' . self::MAX_ATTEMPTS . ' tries)' : '' ), $res );
             }
             return 'failed';
         }
@@ -960,6 +1156,9 @@ class CashFlow_Catalog {
         $first  = array_slice( $entries, 0, $half );
         $second = array_slice( $entries, $half );
         if ( 'stop' === $this->send_split( $secret, $first, $token, self::encode( self::products_body( $first ) ) ) ) {
+            if ( $this->budget_exhausted ) {
+                $this->cut_short_ids = array_merge( $this->cut_short_ids, array_column( $second, 'id' ) );
+            }
             self::release_entries( $second, $token );
             return 'stop';
         }
@@ -968,6 +1167,7 @@ class CashFlow_Catalog {
 
     /** On 200: delete exactly the rows read (by id and token); the product is no longer a parked problem. */
     private function on_products_ok( array $entries, $token, $data ) {
+        $this->any_ok_this_run = true;   // [IMPORTANT 1] corroborates any later single-product 500 as that product's own fault
         $d = is_array( $data ) ? $data : [];
         foreach ( $entries as $e ) {
             foreach ( $e['rows'] as $row ) {
@@ -1078,5 +1278,24 @@ class CashFlow_Catalog {
 
     private static function save_list_state( array $st ) {
         update_option( self::LIST_OPTION, $st, false );
+    }
+
+    // ── The solo list [CRITICAL, review-3] ───────────────────────────
+
+    /** Ids a budget cutoff left unsent, oldest first, deduplicated. */
+    public static function solo_ids() {
+        $s = get_option( self::SOLO_OPTION, [] );
+        return is_array( $s ) ? array_values( array_unique( array_map( 'intval', $s ) ) ) : [];
+    }
+
+    /** Merge in new ids, capped at MAX_PRODUCTS — never an unbounded list. */
+    private static function add_to_solo( array $ids ) {
+        $merged = array_values( array_unique( array_merge( self::solo_ids(), array_map( 'intval', $ids ) ) ) );
+        update_option( self::SOLO_OPTION, array_slice( $merged, 0, self::MAX_PRODUCTS ), false );
+    }
+
+    /** An id leaves the list once it is sent or its try is counted — never merely attempted. */
+    private static function remove_solo_id( $id ) {
+        update_option( self::SOLO_OPTION, array_values( array_diff( self::solo_ids(), [ (int) $id ] ) ), false );
     }
 }

@@ -125,5 +125,25 @@ function cf_queue_scenarios( array $env ): void {
     ok( 'after 10', CashFlow_Catalog::enumerate( 10, 10 ) === [ 13, 14 ] );
     ok( 'past the end: an empty list, which is NOT an error', CashFlow_Catalog::enumerate( 14, 10 ) === [] );
 
+    echo "── claim_listed() takes exactly the listed ids, ANY reason, one at a time, oldest first [CRITICAL, review-4]\n";
+    $env['reset']();
+    CashFlow_Catalog::enqueue( 1, 'asked' );      // listed, and the oldest of the listed rows
+    CashFlow_Catalog::enqueue( 2, 'save' );        // NOT listed — must never be taken instead
+    CashFlow_Catalog::enqueue( 3, 'resend' );      // listed
+    ok( 'the first call takes the oldest LISTED row, not the oldest row overall', $keys( CashFlow_Catalog::claim_listed( 'clA', [ 1, 3 ] ) ) === [ '1:asked' ] );
+    ok( 'the second call takes the next listed row', $keys( CashFlow_Catalog::claim_listed( 'clB', [ 1, 3 ] ) ) === [ '3:resend' ] );
+    ok( 'nothing listed is left; the unlisted save was never touched', CashFlow_Catalog::claim_listed( 'clC', [ 1, 3 ] ) === [] );
+    ok( 'and it never claimed more than one row even when asked for many ids', count( $env['rows']() ) === 3 && [] === array_filter( $env['rows'](), function ( $r ) { return '0' !== $r['attempts']; } ) );
+
+    echo "── still_queued() answers which listed ids still have a row, without claiming or mutating anything\n";
+    $env['reset']();
+    CashFlow_Catalog::enqueue( 5, 'save' );
+    CashFlow_Catalog::enqueue( 6, 'asked' );
+    $before = $env['rows']();
+    $present = CashFlow_Catalog::still_queued( [ 5, 6, 7 ] );
+    sort( $present );
+    ok( 'exactly the ids that have a row, id 7 never existed', $present === [ 5, 6 ] );
+    ok( 'nothing was claimed or changed by asking', $env['rows']() === $before );
+
     CashFlow_Catalog::$clock = null;
 }

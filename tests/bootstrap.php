@@ -284,7 +284,7 @@ class CF_Test_WPDB {
     public function query( $q ) {
         $this->last_error = '';
         [ $sql, $a ] = self::split( $q );
-        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'query', $name, $a, $this ); }
+        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'query', $name, $a, $this, $sql ); }
         CF_TestState::$sql[] = $sql;
         $t = &CF_TestState::$db_options;
         if ( str_starts_with( $sql, "INSERT IGNORE INTO {$this->options} (option_name, option_value, autoload)" ) ) {
@@ -304,7 +304,7 @@ class CF_Test_WPDB {
     public function get_var( $q ) {
         $this->last_error = '';
         [ $sql, $a ] = self::split( $q );
-        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_var', $name, $a, $this ); }
+        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_var', $name, $a, $this, $sql ); }
         CF_TestState::$sql[] = $sql;
         if ( $sql === "SELECT option_value FROM {$this->options} WHERE option_name = %s" ) {
             $v = CF_TestState::$db_options[ $a[0] ] ?? null;
@@ -316,14 +316,14 @@ class CF_Test_WPDB {
     public function get_col( $q ) {
         $this->last_error = '';
         [ $sql, $a ] = self::split( $q );
-        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_col', $name, $a, $this ); }
+        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_col', $name, $a, $this, $sql ); }
         throw new RuntimeException( "harness: \$wpdb->get_col not modelled: $sql" );
     }
     public function get_results( $q, $output = 'OBJECT' ) {
         $this->last_error = '';
         [ $sql, $a ] = self::split( $q );
         if ( ARRAY_A !== $output ) { throw new RuntimeException( 'harness: get_results is modelled for ARRAY_A only' ); }
-        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_results', $name, $a, $this ); }
+        if ( $name = CF_Test_CatalogDB::name_of( $sql ) ) { return CF_Test_CatalogDB::run( 'get_results', $name, $a, $this, $sql ); }
         throw new RuntimeException( "harness: \$wpdb->get_results not modelled: $sql" );
     }
 }

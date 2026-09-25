@@ -37,6 +37,13 @@ function saves( array $ids ): void {
         CashFlow_Catalog::enqueue( $id, 'save' );
     }
 }
+/** Like saves(), but queued under an arbitrary reason — the hourly list ('asked') or "Resend catalogue" ('resend'). */
+function queued( array $ids, string $reason ): void {
+    foreach ( $ids as $id ) {
+        CF_TestState::$products[ $id ] = new WC_Product( $id, 0, 'publish', [ 'name' => "P$id" ] );
+        CashFlow_Catalog::enqueue( $id, $reason );
+    }
+}
 /** Script $n responses decided per request from the decoded body; each request takes $secs seconds. */
 function respond( int $n, callable $fn, float $secs = 0.0 ): void {
     for ( $i = 0; $i < $n; $i++ ) {
@@ -63,6 +70,42 @@ function bodies(): array {
         }
     }
     return $out;
+}
+/**
+ * The CRITICAL stall, reproduced under a given reason [review-4]: 25 rows
+ * queued that way, one of them poisoned at 4 s per 500 ("about 2s or more").
+ * Under the bug (drain_solo() calling claim($token,1,true), which only ever
+ * matches 'save'/'removed'), a queue of asked/resend rows was NEVER drained
+ * one at a time at all — the same large split reformed every run and cut
+ * short before isolating the poison, forever, at zero tries.
+ */
+function stall_repro( string $label, string $reason, int $base ): void {
+    global $T;
+    store();
+    queued( range( $base + 1, $base + 25 ), $reason );
+    $poison_id = $base + 25;
+    for ( $i = 0; $i < 400; $i++ ) {
+        CF_TestState::$api_responses['/plugin/catalog/products'][] = function ( $call ) use ( $poison_id ) {
+            global $T;
+            $body       = json_decode( $call['body'], true );
+            $has_poison = in_array( $poison_id, array_column( $body['products'] ?? [], 'id' ), true );
+            if ( $has_poison ) {
+                $T += 4.0;
+                return err( 500, [ 'error' => 'catalogue_write_failed' ] );
+            }
+            return ok200();
+        };
+    }
+    run_job();
+    ok( "$label: a panel note appears at the very first run", str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'will be sent one at a time' ) );
+    for ( $run = 2; $run <= 9; $run++ ) {
+        $T += 61;
+        queued( [ $base + 100 + $run ], $reason );   // company each retry [IMPORTANT 1]
+        run_job();
+    }
+    ok( "$label: within bounded runs the poison product parks", null !== row_of( $poison_id ) && null !== row_of( $poison_id )['parked_at'] );
+    ok( "$label: the other 24 of the original 25 all went through", [] === array_filter( range( $base + 1, $base + 24 ), function ( $id ) { return null !== row_of( $id ); } ) );
+    ok( "$label: the solo list is empty again", [] === CashFlow_Catalog::solo_ids() );
 }
 function row_of( int $id ): ?array {
     foreach ( CF_TestState::$catalog_queue as $r ) { if ( (int) $r['product_id'] === $id ) { return $r; } }
@@ -117,19 +160,28 @@ ok( 'a parked product is not sent again', count( CF_TestState::$api_calls ) === 
 // The "500 on one product" test above IS the mixed case [IMPORTANT 1]: other
 // products go through first, corroborating the poison as ITS OWN fault
 // rather than an outage — that is why it alone counts a try.
-echo "── IMPORTANT 1: a fast 500 for EVERYONE parks nothing, over many runs, and shows the outage\n";
+echo "── IMPORTANT 1/2: a fast 500 for EVERYONE stops at the first isolated failure, parks nothing, over many runs, and shows the outage\n";
 store();
 saves( range( 9001, 9060 ) );   // 60 real saves, nobody spared
-respond( 400, function () { return err( 500, [ 'error' => 'catalogue_write_failed' ] ); } );   // fails for every single one of them, fast
+respond( 400, function () { return err( 500, [ 'error' => 'catalogue_write_failed' ] ); } );   // fails for every single one of them, fast — including the corroborating empty-products ping
+$per_run = [];
 for ( $pass = 1; $pass <= 3; $pass++ ) {
+    $before = count( CF_TestState::$api_calls );
     run_job();
+    $per_run[] = count( CF_TestState::$api_calls ) - $before;
 }
 $touched = array_filter( CF_TestState::$catalog_queue, function ( $r ) { return '0' !== $r['attempts'] || null !== $r['parked_at']; } );
 ok( 'nothing ever corroborated any one product, so nothing ever counted a try', [] === $touched, count( $touched ) . ' rows touched' );
 ok( 'all 60 are still pending, none lost, none parked', count( CF_TestState::$catalog_queue ) === 60 );
+// [IMPORTANT 2] Once a single product's 500 has nothing to corroborate it,
+// the run stops CLAIMING further batches — it does not keep exploring the
+// whole tree looking for more failures. Logged, not just asserted: this is
+// the number that proves it never approaches 60 (let alone 2*60-1).
+fwrite( STDERR, "requests per run against a fully-failing 60-product queue: " . implode( ', ', $per_run ) . "\n" );
+ok( 'a bounded handful of requests per run, nothing like 60', max( $per_run ) < 15, implode( ',', $per_run ) );
 ok( 'the panel names it an outage, not a per-product failure',
     str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'outage' )
-    && str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'nothing went through this run' ) );
+    && str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'did not answer an empty request either' ) );
 
 echo "── a 400 (a malformed envelope) is NEVER split — every row costs one try, in ONE request [IMPORTANT 2]\n";
 store();
@@ -254,6 +306,63 @@ ok( 'the poison product parks after its tries', null !== row_of( $poison_id ) &&
 ok( 'the other 24 of the original 25 all went through', [] === array_filter( range( 2001, 2024 ), function ( $id ) { return null !== row_of( $id ); } ) );
 ok( 'the newer save also went through', null === row_of( 2100 ) );
 ok( 'the solo list is empty again, nothing left waiting on one-at-a-time treatment', [] === CashFlow_Catalog::solo_ids() );
+
+echo "── CRITICAL: the same stall, reproduced with 'asked' rows (the hourly list) [review-4]\n";
+stall_repro( 'asked', 'asked', 3000 );
+
+echo "── CRITICAL: the same stall, reproduced with 'resend' rows (Resend catalogue) [review-4]\n";
+stall_repro( 'resend', 'resend', 4000 );
+
+echo "── IMPORTANT 1: a healthy server + slow product READS — a depth-0 cutoff is not a refusal\n";
+store();
+saves( range( 5001, 5025 ) );   // 25 products; the server never refuses anything, ever
+respond( 5, function () { return ok200(); } );
+// The slowness is in READING the products, not the network — this batch is
+// never even attempted (can_start() fails before send_split()'s first call,
+// depth 0), so it must read exactly like it always did: released untried,
+// no solo list, no refusal note [IMPORTANT 1].
+CF_TestState::$on_wc_get_product = function () { global $T; $T += 0.6; };
+run_job();
+CF_TestState::$on_wc_get_product = null;
+ok( 'no request was even attempted — the reads alone exhausted the budget', [] === bodies() );
+ok( 'nothing lands on the solo list', [] === CashFlow_Catalog::solo_ids() );
+ok( 'no refusal note appears', ! str_contains( (string) ( CashFlow_Catalog::stats()['last_error'] ?? '' ), 'refused a batch' ) );
+ok( 'every row is back, untouched', 25 === count( CF_TestState::$catalog_queue )
+    && [] === array_filter( CF_TestState::$catalog_queue, function ( $r ) { return '0' !== $r['attempts'] || null !== $r['token']; } ) );
+respond( 5, function () { return ok200(); } );
+run_job();   // reads are fast again
+ok( 'throughput stays BATCHED — nothing forced this onto a one-at-a-time path', bodies() === [ [ 5001, 5002, 5003, 5004, 5005, 5006, 5007, 5008, 5009, 5010, 5011, 5012, 5013, 5014, 5015, 5016, 5017, 5018, 5019, 5020, 5021, 5022, 5023, 5024, 5025 ] ] );
+
+echo "── NEW RULE: a lone single's 500 is corroborated with an empty products request — both branches\n";
+store();
+saves( [ 6501 ] );   // alone: nothing else this run to corroborate it any other way
+respond( 1, function () { return err( 500, [ 'error' => 'catalogue_write_failed' ] ); } );
+respond( 1, function ( $body ) {
+    ok( 'the corroborating request carries an empty products array and the usual site block',
+        [] === ( $body['products'] ?? 'missing' ) && isset( $body['site'] ) );
+    return ok200();
+} );
+run_job();
+ok( 'the ping succeeded: the server is up, so the try counts against the product', '1' === ( row_of( 6501 )['attempts'] ?? null ) );
+ok( 'no outage wording — the ping proved it is not one', ! str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'outage' ) );
+
+store();
+saves( [ 6502 ] );
+respond( 1, function () { return err( 500, [ 'error' => 'catalogue_write_failed' ] ); } );
+respond( 1, function () { return err( 502, null ); } );   // the ping ALSO fails
+run_job();
+ok( 'the ping also failed: no try counted, an outage', '0' === ( row_of( 6502 )['attempts'] ?? null ) && null === row_of( 6502 )['token'] );
+ok( '"outage" appears ONLY because the empty request also failed', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'outage' )
+    && str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'did not answer an empty request either' ) );
+
+echo "── minor: add_to_solo() returns what is actually listed, after capping at MAX_PRODUCTS — never the uncapped merge\n";
+store();
+$ref_add = new ReflectionMethod( 'CashFlow_Catalog', 'add_to_solo' );
+$first_batch = $ref_add->invoke( null, range( 9101, 9120 ) );      // 20 — under the cap, nothing to trim yet
+ok( 'under the cap: everything given comes back', count( $first_batch ) === 20 );
+$second_batch = $ref_add->invoke( null, range( 9121, 9140 ) );     // 20 more — 40 total, well past MAX_PRODUCTS
+ok( 'over the cap: the RETURNED list is capped at MAX_PRODUCTS, not the 40 merged', count( $second_batch ) === 25 );
+ok( 'and it is exactly what got stored, so a caller counting it never overstates the panel', $second_batch === CashFlow_Catalog::solo_ids() );
 
 echo "── a database failure while recording a try is the panel's last word, not overwritten by the send failure\n";
 store();

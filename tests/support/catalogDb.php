@@ -18,10 +18,10 @@ class CF_Test_CatalogDB {
     /** Which $wpdb method each statement must arrive through. */
     const METHODS = [
         'show_table' => 'get_var', 'insert' => 'query', 'insert_set' => 'query',
-        'claim_real' => 'query', 'claim_any' => 'query', 'select_claimed' => 'get_results',
+        'claim_real' => 'query', 'claim_any' => 'query', 'claim_listed' => 'query', 'select_claimed' => 'get_results',
         'done' => 'query', 'release_failed' => 'query', 'release_untried' => 'query', 'park' => 'query',
         'clear_parked' => 'query', 'count_pending' => 'get_var', 'count_parked' => 'get_var',
-        'parked_ids' => 'get_col', 'enumerate' => 'get_col',
+        'parked_ids' => 'get_col', 'enumerate' => 'get_col', 'exists_listed' => 'get_col',
     ];
 
     // The exact text CashFlow_Catalog::sql() must produce, on the table names
@@ -46,17 +46,48 @@ class CF_Test_CatalogDB {
         'enumerate'       => "SELECT ID FROM wp_posts WHERE post_type = 'product' AND post_status IN ('publish', 'future', 'draft', 'pending', 'private') AND ID > %d ORDER BY ID ASC LIMIT %d",
     ];
 
-    public static function name_of( string $sql ): ?string {
-        $name = array_search( $sql, self::SQL, true );
-        return false === $name ? null : $name;
+    // claim_listed and exists_listed both embed {ids} as a literal CSV of
+    // ints straight in the SQL text — a runtime-variable list, unlike every
+    // other {…} placeholder here (SET_STATUSES never changes), so neither
+    // can be ONE fixed literal in SQL above. Recognised instead by the exact
+    // literal text either SIDE of that one variable list: any deviation in
+    // either fixed part still fails to match, the same guarantee SQL gives
+    // everywhere else — only the ids themselves are unconstrained, and even
+    // those must be a plain digit/comma list or this refuses to recognise it.
+    const CLAIM_LISTED_PREFIX  = 'UPDATE wp_cashflow_catalog_queue SET attempts = attempts + IF(token IS NULL, 0, 1), token = %s, claimed_at = %s, pending_key = NULL WHERE parked_at IS NULL AND (token IS NULL OR claimed_at < %s) AND (retry_at IS NULL OR retry_at <= %s) AND product_id IN (';
+    const CLAIM_LISTED_SUFFIX  = ') ORDER BY id ASC LIMIT %d';
+    const EXISTS_LISTED_PREFIX = 'SELECT DISTINCT product_id FROM wp_cashflow_catalog_queue WHERE product_id IN (';
+    const EXISTS_LISTED_SUFFIX = ')';
+
+    /** The ids literally embedded between a listed statement's fixed prefix and suffix. */
+    private static function listed_ids( string $sql, string $prefix, string $suffix ): array {
+        $middle = substr( $sql, strlen( $prefix ), -strlen( $suffix ) );
+        if ( ! preg_match( '/^[0-9]+(,[0-9]+)*$/', $middle ) ) {
+            throw new RuntimeException( 'harness: a listed statement\'s ids were not a plain digit list: ' . $sql );
+        }
+        return array_map( 'intval', explode( ',', $middle ) );
     }
 
-    public static function run( string $method, string $name, array $a, $wpdb ) {
+    public static function name_of( string $sql ): ?string {
+        $name = array_search( $sql, self::SQL, true );
+        if ( false !== $name ) {
+            return $name;
+        }
+        if ( str_starts_with( $sql, self::CLAIM_LISTED_PREFIX ) && str_ends_with( $sql, self::CLAIM_LISTED_SUFFIX ) ) {
+            return 'claim_listed';
+        }
+        if ( str_starts_with( $sql, self::EXISTS_LISTED_PREFIX ) && str_ends_with( $sql, self::EXISTS_LISTED_SUFFIX ) ) {
+            return 'exists_listed';
+        }
+        return null;
+    }
+
+    public static function run( string $method, string $name, array $a, $wpdb, string $sql = '' ) {
         CF_TestState::$sql[] = 'catalog:' . $name;
         if ( ( self::METHODS[ $name ] ?? null ) !== $method ) {
             throw new RuntimeException( "harness: catalogue statement $name must not arrive through \$wpdb->$method" );
         }
-        if ( null !== CF_TestState::$db_error_on && str_contains( self::SQL[ $name ], CF_TestState::$db_error_on ) ) {
+        if ( null !== CF_TestState::$db_error_on && str_contains( $sql, CF_TestState::$db_error_on ) ) {
             $wpdb->last_error = 'harness: injected failure in ' . $name;
             return 'query' === $method ? false : ( 'get_var' === $method ? null : [] );
         }
@@ -77,13 +108,16 @@ class CF_Test_CatalogDB {
 
             case 'claim_real':
             case 'claim_any':
+            case 'claim_listed':
                 [ $token, $at, $stale_before, $now, $limit ] = $a;
+                $listed = 'claim_listed' === $name ? self::listed_ids( $sql, self::CLAIM_LISTED_PREFIX, self::CLAIM_LISTED_SUFFIX ) : [];
                 $due = [];
                 foreach ( $q as $r ) {
                     if ( null !== $r['parked_at'] ) { continue; }
                     if ( null !== $r['token'] && ! ( $r['claimed_at'] < $stale_before ) ) { continue; }
                     if ( null !== $r['retry_at'] && ! ( $r['retry_at'] <= $now ) ) { continue; }
                     if ( 'claim_real' === $name && ! in_array( $r['reason'], [ 'save', 'removed' ], true ) ) { continue; }
+                    if ( 'claim_listed' === $name && ! in_array( (int) $r['product_id'], $listed, true ) ) { continue; }
                     $due[] = $r;
                 }
                 usort( $due, function ( $x, $y ) use ( $name ) {
@@ -164,6 +198,13 @@ class CF_Test_CatalogDB {
 
             case 'enumerate':
                 return array_map( 'strval', self::set_ids( (int) $a[0], (int) $a[1] ) );
+
+            case 'exists_listed':
+                $ids = self::listed_ids( $sql, self::EXISTS_LISTED_PREFIX, self::EXISTS_LISTED_SUFFIX );
+                $present = array_unique( array_map( function ( $r ) { return (int) $r['product_id']; },
+                    array_filter( $q, function ( $r ) use ( $ids ) { return in_array( (int) $r['product_id'], $ids, true ); } ) ) );
+                sort( $present );
+                return array_map( 'strval', array_values( $present ) );
         }
         throw new RuntimeException( "harness: catalogue statement $name not modelled" );
     }

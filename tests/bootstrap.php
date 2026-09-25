@@ -57,6 +57,7 @@ class CF_TestState {
     public static int   $cache_flushes = 0;
     public static array $product_reads = [];  // every WC_Product getter read: [ prop, context ]
     public static $on_product_get = null;     // callable( string $prop, WC_Product ): runs inside every getter
+    public static $on_wc_get_product = null;  // callable( int $id ): runs inside wc_get_product(), BEFORE it returns
     public static array $catalog_tables = [];  // table name => true (created by dbDelta)
     public static array $catalog_queue = [];   // the queue TABLE: id => row, values as MySQL returns them (strings / null)
     public static int   $catalog_queue_next = 1;
@@ -94,6 +95,7 @@ class CF_TestState {
         self::$cache_flushes = 0;
         self::$product_reads = [];
         self::$on_product_get = null;
+        self::$on_wc_get_product = null;
         self::$catalog_tables = [];
         self::$catalog_queue = [];
         self::$catalog_queue_next = 1;
@@ -453,7 +455,10 @@ class WC_Product {
     public function is_type( $type ) { return in_array( $this->props['type'], (array) $type, true ); }
 }
 /** Like core: false for an id that is not a product. Never invents one. */
-function wc_get_product( $id ) { return CF_TestState::$products[ (int) $id ] ?? false; }
+function wc_get_product( $id ) {
+    if ( CF_TestState::$on_wc_get_product ) { ( CF_TestState::$on_wc_get_product )( (int) $id ); }
+    return CF_TestState::$products[ (int) $id ] ?? false;
+}
 
 /**
  * wc_transaction_query — modelled as a real transaction: 'start' snapshots the

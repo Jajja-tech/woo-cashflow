@@ -758,9 +758,9 @@ class CashFlow_Catalog {
         if ( ! $entries ) {
             return 'sent';
         }
-        list( $fit, $rest ) = self::pack( $entries );
+        list( $fit, $rest, $body ) = self::pack( $entries );
         self::release_entries( $rest, $token );          // did not fit: the next claim takes them, no try counted
-        return 'stop' === $this->send_split( $secret, $fit, $token ) ? 'stop' : 'sent';
+        return 'stop' === $this->send_split( $secret, $fit, $token, $body ) ? 'stop' : 'sent';
     }
 
     /** One entry per product id: the product as it is NOW, or a removal if it is gone. */
@@ -791,21 +791,16 @@ class CashFlow_Catalog {
                 $entries[] = [ 'kind' => 'product', 'id' => $id, 'rows' => $group,
                     'body' => $built['fields'] + [ 'fingerprint' => $built['fingerprint'], 'sent_seq' => $seq ] ];
             } catch ( Throwable $e ) {
-                // Every row for this product fails/parks together [see task-9
-                // deviations #4]. fail_row can itself hit a database failure
-                // ('error') and has already recorded it via note_error — a
-                // second, more generic note_error below would silently
-                // overwrite that real failure with this read failure's
-                // wording, and neither outcome is "parked" unless fail_row
-                // actually says so.
-                $db_failed = false;
+                // Recorded UNCONDITIONALLY and BEFORE fail_row runs: if fail_row
+                // then hits its own database failure it calls note_error again,
+                // and that later call is deliberately what is left on the panel
+                // — a live database failure outranks "a product could not be
+                // read", which is usually a symptom of the same outage. Both
+                // messages still reach the sync log, because note_error logs
+                // whenever the message actually changes.
+                self::note_error( 'Product ' . $id . ' could not be read: ' . $e->getMessage() );
                 foreach ( $group as $row ) {
-                    if ( 'error' === self::fail_row( $row, $token ) ) {
-                        $db_failed = true;
-                    }
-                }
-                if ( ! $db_failed ) {
-                    self::note_error( 'Product ' . $id . ' could not be read: ' . $e->getMessage() );
+                    self::fail_row( $row, $token );
                 }
             }
         }
@@ -813,13 +808,20 @@ class CashFlow_Catalog {
         return $entries;
     }
 
-    /** As many entries as fit in MAX_BODY_BYTES (always at least one — one product is fitted under MAX_ONE_BYTES). */
+    /**
+     * As many entries as fit in MAX_BODY_BYTES (always at least one — one
+     * product is fitted under MAX_ONE_BYTES). Returns the ENCODED body
+     * alongside the entries it was measured from, so the bytes send_split()
+     * posts are the exact bytes measured here — never re-encoded.
+     */
     private static function pack( array $entries ) {
         $rest = [];
-        while ( count( $entries ) > 1 && strlen( self::encode( self::products_body( $entries ) ) ) > self::MAX_BODY_BYTES ) {
+        $body = self::encode( self::products_body( $entries ) );
+        while ( count( $entries ) > 1 && strlen( $body ) > self::MAX_BODY_BYTES ) {
             array_unshift( $rest, array_pop( $entries ) );
+            $body = self::encode( self::products_body( $entries ) );
         }
-        return [ $entries, $rest ];
+        return [ $entries, $rest, $body ];
     }
 
     private static function products_body( array $entries ) {
@@ -847,23 +849,51 @@ class CashFlow_Catalog {
         return [ 'siteurl' => (string) get_option( 'siteurl', '' ), 'home' => (string) get_option( 'home', '' ) ];
     }
 
-    /** The body is encoded HERE, with JSON_FLAGS, so the bytes sent are the bytes measured. */
-    private function post( $secret, $endpoint, array $body ) {
-        return CashFlow_Plugin::api_request( $endpoint, 'POST', self::encode( $body ), $secret, self::REQUEST_TIMEOUT );
+    /** $body is already-encoded JSON (from pack()): never re-encoded, so the bytes sent are the bytes measured. */
+    private function post( $secret, $endpoint, $body ) {
+        return CashFlow_Plugin::api_request( $endpoint, 'POST', $body, $secret, self::REQUEST_TIMEOUT );
     }
 
-    private function send_split( $secret, array $entries, $token ) {
+    /**
+     * True when $data carries every one of $keys as its own array field — the
+     * minimum shape the wire contract promises. A 2xx with no body, a null
+     * body, or an HTML error page answering `ok:true` must never be read as
+     * the real contract: that is exactly the shape that would otherwise
+     * delete rows CashFlow was never told about. Shared with later catalogue
+     * routes (e.g. Task 10's list `classify()`), which check their own keys.
+     */
+    public static function has_shape( $data, array $keys ) {
+        if ( ! is_array( $data ) ) {
+            return false;
+        }
+        foreach ( $keys as $k ) {
+            if ( ! isset( $data[ $k ] ) || ! is_array( $data[ $k ] ) ) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private function send_split( $secret, array $entries, $token, $body ) {
         if ( ! $this->can_start() ) {
             self::release_entries( $entries, $token );
             return 'stop';
         }
-        $res = $this->post( $secret, self::EP_PRODUCTS, self::products_body( $entries ) );
-        if ( ! empty( $res['ok'] ) ) {
+        $res = $this->post( $secret, self::EP_PRODUCTS, $body );
+        if ( ! empty( $res['ok'] ) && self::has_shape( $res['data'] ?? null, [ 'applied', 'trashed', 'unchanged' ] ) ) {
             $this->on_products_ok( $entries, $token, $res['data'] );
             return 'ok';
         }
         self::release_entries( $entries, $token );
-        self::note_failure( 'Sending products', $res );
+        if ( ! empty( $res['ok'] ) ) {
+            // The server answered success, but not with the body it promises —
+            // never treat that as "nothing was written". The rows are kept
+            // (released untried, above), not deleted on an assumption.
+            self::note_error( 'Sending products failed: CashFlow answered HTTP '
+                . (int) ( $res['status'] ?? 0 ) . ' without the expected body' );
+        } else {
+            self::note_failure( 'Sending products', $res );
+        }
         return 'stop';
     }
 
@@ -900,8 +930,37 @@ class CashFlow_Catalog {
     }
 
     private static function note_failure( $what, array $res ) {
-        $why = class_exists( 'CashFlow_Sync_Pull' ) ? CashFlow_Sync_Pull::describe_failure( $res ) : 'HTTP ' . (int) ( $res['status'] ?? 0 );
-        self::note_error( $what . ' failed: ' . $why );
+        self::note_error( $what . ' failed: ' . self::describe_connection_refusal( $res ) );
+    }
+
+    /**
+     * A 403 connection_not_eligible / site_mismatch names WHY on the wire
+     * (wire-contract.md, "Refusals common to all three routes") — show that
+     * reason, not a bare status code. store_address_missing gets the wire
+     * contract's exact wording, since it is CashFlow's own data gap, not the
+     * site's fault. A connection_not_eligible with NO reason at all means the
+     * secret resolved to no connection identity — the wire contract says to
+     * treat that as connection_missing. Anything else falls back to the one
+     * shared "why did this fail" wording (CashFlow_Sync_Pull::describe_failure).
+     */
+    private static function describe_connection_refusal( array $res ) {
+        $status = isset( $res['status'] ) ? (int) $res['status'] : 0;
+        $data   = is_array( $res['data'] ?? null ) ? $res['data'] : [];
+        $error  = is_string( $data['error'] ?? null ) ? $data['error'] : '';
+        $reason = is_string( $data['reason'] ?? null ) ? $data['reason'] : '';
+        if ( 403 === $status && 'connection_not_eligible' === $error ) {
+            if ( '' === $reason ) {
+                $reason = 'connection_missing';
+            }
+            if ( 'store_address_missing' === $reason ) {
+                return 'CashFlow has no store address for this connection — reconnect the store from CashFlow';
+            }
+            return 'CashFlow refused this connection: ' . $reason;
+        }
+        if ( 403 === $status && 'site_mismatch' === $error && '' !== $reason ) {
+            return 'CashFlow refused this connection: ' . $reason;
+        }
+        return class_exists( 'CashFlow_Sync_Pull' ) ? CashFlow_Sync_Pull::describe_failure( $res ) : 'HTTP ' . $status;
     }
 
     /** Only the in-request cache: a persistent object cache is never flushed. [NB2] */

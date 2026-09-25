@@ -54,10 +54,14 @@ store();
 product( 501, [ 'name' => 'Scarf', 'regular_price' => '1200', 'sale_price' => '990' ] );
 CashFlow_Catalog::enqueue( 501, 'save' );
 products_ok();
+// Captured INSIDE wc_get_product() itself, not merely inside a field getter —
+// a marker taken during a field getter cannot tell "next_seq before
+// wc_get_product" apart from "next_seq after wc_get_product but before
+// payload()", since both happen before any field is ever read.
 $inside = null;
-CF_TestState::$on_product_get = function () use ( &$inside ) { if ( null === $inside ) { $inside = CashFlow_Catalog::next_seq(); } };
+CF_TestState::$on_wc_get_product = function () use ( &$inside ) { if ( null === $inside ) { $inside = CashFlow_Catalog::next_seq(); } };
 run_job();
-CF_TestState::$on_product_get = null;
+CF_TestState::$on_wc_get_product = null;
 $s = sent();
 ok( 'exactly one POST to /plugin/catalog/products', count( $s ) === 1, count( $s ) . ' calls' );
 $call = $s[0] ?? [ 'json' => [], 'body' => null, 'token' => null, 'method' => null, 'timeout' => null ];
@@ -70,7 +74,7 @@ ok( 'the product is the payload builder\'s, plus fingerprint and sent_seq',
     array_keys( $p ) === array_merge( array_keys( CashFlow_Catalog::payload( CF_TestState::$products[501] )['fields'] ), [ 'fingerprint', 'sent_seq' ] ) );
 ok( 'the fingerprint is the one the builder computes', $p['fingerprint'] === CashFlow_Catalog::payload( CF_TestState::$products[501] )['fingerprint'] );
 ok( 'sent_seq is an integer STRING', is_string( $p['sent_seq'] ) && 1 === preg_match( '/^[0-9]{16}$/', $p['sent_seq'] ) );
-ok( 'sent_seq was taken BEFORE the product was read [NB5]', null !== $inside && (int) $p['sent_seq'] < (int) $inside );
+ok( 'sent_seq was taken BEFORE wc_get_product() was called [NB5]', null !== $inside && (int) $p['sent_seq'] < (int) $inside );
 ok( 'no removed key when nothing was removed', ! array_key_exists( 'removed', $call['json'] ) );
 ok( 'on 200 the row is deleted', CF_TestState::$catalog_queue === [] );
 ok( 'the panel records the send', ( CashFlow_Catalog::stats()['sent_count'] ?? 0 ) === 1 && ! empty( CashFlow_Catalog::stats()['last_send_at'] ) );
@@ -82,7 +86,8 @@ product( 501 );
 CashFlow_Catalog::enqueue( 501, 'save' );
 CF_TestState::$api_responses['/plugin/catalog/products'][] = function () {
     CashFlow_Catalog::enqueue( 501, 'save' );                 // the admin saves again while we are sending
-    return [ 'ok' => true, 'status' => 200, 'data' => [ 'list_wanted' => false ] ];
+    return [ 'ok' => true, 'status' => 200,
+        'data' => [ 'applied' => [ 501 ], 'trashed' => [], 'unchanged' => [], 'list_wanted' => false ] ];
 };
 products_ok();
 run_job();
@@ -186,12 +191,15 @@ product( 501 );
 // superseding the other, because pending_key is NULL while a row is claimed —
 // only ONE of the two ever holds the NOT-NULL pending_key at a time, and here
 // both are simply due to be claimed in the same batch.
+// Realistic: a row is claimed (token set) exactly when enqueue's INSERT would
+// have left it NULL — pending_key is ONLY non-null while a row WAITS, and the
+// claim SQL itself blanks it (`pending_key = NULL`) the moment it is taken.
 CF_TestState::$catalog_queue[90] = [ 'id' => '90', 'product_id' => '501', 'reason' => 'save', 'token' => 'dead-run-token',
     'attempts' => '1', 'queued_at' => '2026-09-20 00:00:00', 'claimed_at' => '2020-01-01 00:00:00', 'retry_at' => null,
     'parked_at' => null, 'pending_key' => null ];
 CF_TestState::$catalog_queue[91] = [ 'id' => '91', 'product_id' => '501', 'reason' => 'save', 'token' => null,
     'attempts' => '0', 'queued_at' => '2026-09-20 00:00:01', 'claimed_at' => null, 'retry_at' => null,
-    'parked_at' => null, 'pending_key' => null ];
+    'parked_at' => null, 'pending_key' => '501:save' ];
 CF_TestState::$catalog_queue_next = 92;
 products_ok();
 run_job();
@@ -207,7 +215,7 @@ CF_TestState::$catalog_queue[90] = [ 'id' => '90', 'product_id' => '501', 'reaso
     'parked_at' => null, 'pending_key' => null ];
 CF_TestState::$catalog_queue[91] = [ 'id' => '91', 'product_id' => '501', 'reason' => 'save', 'token' => null,
     'attempts' => '0', 'queued_at' => '2026-09-20 00:00:01', 'claimed_at' => null, 'retry_at' => null,
-    'parked_at' => null, 'pending_key' => null ];
+    'parked_at' => null, 'pending_key' => '501:save' ];
 CF_TestState::$catalog_queue_next = 92;
 CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 500, 'error' => 'boom', 'data' => [ 'error' => 'catalogue_write_failed' ] ];
 run_job();
@@ -217,10 +225,114 @@ ok( 'exactly one send was attempted for the one product', count( sent() ) === 1 
 // fallback (done_row when release_untried affects 0 rows) deletes the loser as
 // redundant, since the survivor already carries the same change forward.
 ok( 'exactly one row remains for the product — not lost, not left duplicated', count( CF_TestState::$catalog_queue ) === 1 );
-$left = array_values( CF_TestState::$catalog_queue )[0] ?? [ 'token' => 'unset', 'claimed_at' => 'unset', 'pending_key' => null, 'product_id' => null ];
+$left = array_values( CF_TestState::$catalog_queue )[0] ?? [ 'token' => 'unset', 'claimed_at' => 'unset', 'pending_key' => null, 'product_id' => null, 'attempts' => null ];
 ok( 'the surviving row is claimable again next run, with no try counted for this failure',
     null === $left['token'] && null === $left['claimed_at'] && null !== $left['pending_key']
-    && '501' === $left['product_id'] );
+    && '501' === $left['product_id']
+    // '2' is row 90's attempts AFTER the claim bumped it (its token was already
+    // set, so the reclaim itself counted a try) — release_untried touches no
+    // attempts column at all, so a FAILED send must leave it at exactly that,
+    // never one higher for the release and never reset to row 91's untried '0'.
+    && '2' === $left['attempts'] );
+
+echo "── a 2xx with no contract body must never delete rows\n";
+store();
+product( 501 );
+CashFlow_Catalog::enqueue( 501, 'save' );
+CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => true, 'status' => 200, 'data' => null ];
+run_job();
+ok( 'a 200 whose data is null did NOT delete the row', count( CF_TestState::$catalog_queue ) === 1 );
+ok( 'and the panel records why', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '',
+    'CashFlow answered HTTP 200 without the expected body' ) );
+
+store();
+product( 501 );
+CashFlow_Catalog::enqueue( 501, 'save' );
+CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => true, 'status' => 200, 'data' => '<html>ok</html>' ];
+run_job();
+ok( 'a 200 whose body is HTML (not the contract) did NOT delete the row', count( CF_TestState::$catalog_queue ) === 1 );
+$row = array_values( CF_TestState::$catalog_queue )[0] ?? [ 'attempts' => null, 'token' => 'unset' ];
+ok( 'and no try was counted for it', '0' === $row['attempts'] && null === $row['token'] );
+ok( 'the panel records why, for this one too', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '',
+    'CashFlow answered HTTP 200 without the expected body' ) );
+
+echo "── a 200 that DOES carry the contract's three arrays is still accepted\n";
+store();
+product( 501 );
+CashFlow_Catalog::enqueue( 501, 'save' );
+products_ok();
+run_job();
+ok( 'a real contract body is still treated as success', CF_TestState::$catalog_queue === [] );
+
+echo "── a 403 connection_not_eligible shows its reason on the panel\n";
+store();
+product( 501 );
+CashFlow_Catalog::enqueue( 501, 'save' );
+CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 403,
+    'data' => [ 'error' => 'connection_not_eligible', 'reason' => 'store_address_missing' ] ];
+run_job();
+ok( 'store_address_missing uses the wire contract\'s exact wording', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '',
+    'CashFlow has no store address for this connection — reconnect the store from CashFlow' ) );
+ok( 'the row is kept, not deleted, on a refusal', count( CF_TestState::$catalog_queue ) === 1 );
+
+store();
+product( 501 );
+CashFlow_Catalog::enqueue( 501, 'save' );
+CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 403,
+    'data' => [ 'error' => 'connection_not_eligible', 'reason' => 'not_connected' ] ];
+run_job();
+ok( 'another reason reads "CashFlow refused this connection: <reason>"', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '',
+    'CashFlow refused this connection: not_connected' ) );
+ok( 'the row is kept, not deleted', count( CF_TestState::$catalog_queue ) === 1 );
+
+store();
+product( 501 );
+CashFlow_Catalog::enqueue( 501, 'save' );
+CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 403,
+    'data' => [ 'error' => 'connection_not_eligible' ] ];   // no reason at all
+run_job();
+ok( 'no reason at all is treated as connection_missing, per the wire contract', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '',
+    'CashFlow refused this connection: connection_missing' ) );
+ok( 'the row is kept, not deleted', count( CF_TestState::$catalog_queue ) === 1 );
+
+echo "── site_mismatch keeps its reason too\n";
+store();
+product( 501 );
+CashFlow_Catalog::enqueue( 501, 'save' );
+CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 403,
+    'data' => [ 'error' => 'site_mismatch', 'reason' => 'host_differs' ] ];
+run_job();
+ok( 'host_differs is shown', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '', 'CashFlow refused this connection: host_differs' ) );
+ok( 'the row is kept, not deleted', count( CF_TestState::$catalog_queue ) === 1 );
+
+store();
+product( 501 );
+CashFlow_Catalog::enqueue( 501, 'save' );
+CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 403,
+    'data' => [ 'error' => 'site_mismatch', 'reason' => 'site_missing' ] ];
+run_job();
+ok( 'site_missing is shown', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '', 'CashFlow refused this connection: site_missing' ) );
+ok( 'this row is kept too, not deleted', count( CF_TestState::$catalog_queue ) === 1 );
+
+echo "── a product read throws AND the database fails: both messages logged, the database one is the panel's last word\n";
+store();
+product( 780, [ 'category_ids' => [ 9001 ] ] );   // a non-empty category list drives a get_terms() lookup
+CF_TestState::$terms_error = 'boom: terms unavailable';   // get_terms() answers a WP_Error -> payload() throws
+CashFlow_Catalog::enqueue( 780, 'save' );
+// The row's attempts is 0, so fail_row takes the release_failed path (below
+// MAX_ATTEMPTS) — make THAT write fail too, like a real database outage would.
+CF_TestState::$db_error_on = 'attempts = attempts + 1, token = NULL';
+run_job();
+CF_TestState::$db_error_on = null;
+CF_TestState::$terms_error = null;
+ok( 'nothing was ever sent — the product never built a body', count( sent() ) === 0 );
+$log = array_column( CF_TestState::$log, 'message' );
+ok( 'the read-failure message reached the sync log', 0 < count( array_filter( $log,
+    function ( $m ) { return false !== strpos( $m, 'Product 780 could not be read' ); } ) ) );
+ok( 'the database-failure message ALSO reached the sync log', 0 < count( array_filter( $log,
+    function ( $m ) { return false !== strpos( $m, 'catalogue queue could not be updated' ); } ) ) );
+ok( 'the panel shows the database failure as the last word, not the read failure',
+    false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '', 'catalogue queue could not be updated' ) );
 
 CashFlow_Catalog::$clock = null;
 summary();

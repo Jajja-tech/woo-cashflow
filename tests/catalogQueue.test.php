@@ -44,6 +44,21 @@ CF_TestState::$db_error_on = 'SELECT ID FROM wp_posts';
 ok( 'a failed enumeration answers null, not []', CashFlow_Catalog::enumerate( 0, 100 ) === null );
 CF_TestState::$db_error_on = null;
 
+// A read that answers with ids that cannot be this query's (a connection that
+// was not ready hands back the PREVIOUS query's result, with no last_error):
+// not ascending, or not after the position, is a failed read — never a page
+// that could claim the set has ended.
+$real_wpdb = $GLOBALS['wpdb'];
+foreach ( [ 'out of order' => [ '9', '7' ], 'not after the position' => [ '3', '12' ], 'repeated' => [ '12', '12' ] ] as $label => $stale ) {
+    $GLOBALS['wpdb'] = new class( $stale ) extends CF_Test_WPDB {
+        private $stale;
+        public function __construct( $stale ) { $this->stale = $stale; }
+        public function get_col( $q = null, $x = 0 ) { return $this->stale; }
+    };
+    ok( "an enumeration whose ids are $label answers null", CashFlow_Catalog::enumerate( 5, 100 ) === null );
+}
+$GLOBALS['wpdb'] = $real_wpdb;
+
 // A controllable clock for the lease/attempt assertions below — independent of
 // the one cf_queue_scenarios() used and cleared on its own way out.
 $clock = 1790500000.0;

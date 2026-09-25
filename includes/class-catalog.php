@@ -493,7 +493,20 @@ class CashFlow_Catalog {
         if ( '' !== (string) $wpdb->last_error || ! is_array( $ids ) ) {
             return null;
         }
-        return array_map( 'intval', $ids );
+        $ids  = array_map( 'intval', $ids );
+        // Ids that cannot be this query's answer — not strictly ascending, or
+        // not after the position — mean the read failed without saying so (a
+        // connection that was not ready hands back the previous query's
+        // result). A failed read must never become a page that ends the set.
+        $prev = (int) $after_id;
+        foreach ( $ids as $id ) {
+            if ( $id <= $prev ) {
+                self::note_error( 'The product list could not be read: the database answered out of order.' );
+                return null;
+            }
+            $prev = $id;
+        }
+        return $ids;
     }
 
     public static function count_pending() {

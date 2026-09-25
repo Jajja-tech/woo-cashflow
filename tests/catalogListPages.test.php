@@ -47,6 +47,15 @@ function follow( array $extra = [] ): callable {
         return ok_page( $extra + [ 'after_id' => $last, 'complete' => $b['complete'], 'outcome' => $b['complete'] ? 'trashed' : null ] );
     };
 }
+/** Like follow(), but the RESPONSE ITSELF costs $cost seconds — a slow list-page server, distinct from a slow build. */
+function slow_follow( float $cost, array $extra = [] ): callable {
+    return function ( $b ) use ( $cost, $extra ) {
+        global $T;
+        $T += $cost;
+        $last = $b['rows'] ? end( $b['rows'] )[0] : $b['after_id'];
+        return ok_page( $extra + [ 'after_id' => $last, 'complete' => $b['complete'], 'outcome' => $b['complete'] ? 'trashed' : null ] );
+    };
+}
 function pages(): array {
     return array_values( array_map( function ( $c ) { return json_decode( $c['body'], true ); },
         array_filter( CF_TestState::$api_calls, function ( $c ) { return '/plugin/catalog/list/page' === $c['endpoint']; } ) ) );
@@ -87,14 +96,22 @@ ok( 'junk in need is ignored', CF_TestState::$catalog_queue === [] );
 ok( 'the panel counts what was asked', ( CashFlow_Catalog::stats()['last_list']['asked'] ?? null ) === 1 );
 
 echo "── pages are sized by TIME, not count [NB2]\n";
+// A list already open (store()'s default) means the run's FIRST page goes
+// through work()'s step -1, which reserves REQUEST_TIMEOUT on top of the
+// usual margin [task-12, IMPORTANT 1, second review] — a 3 s build, not
+// PAGE_BUILD_SECONDS' full 6, so a real-save batch always has room after
+// it. Step 2/3's own calls (unaffected) still get the full 6 s. Same
+// total time spent building this run either way (13 s = 3+6+4, same as
+// the pre-fix 6+6+1) — only the FIRST page shrank.
 store( range( 101, 200 ) );
 CF_TestState::$on_product_get = function ( $prop ) { global $T; if ( 'name' === $prop ) { $T += 0.25; } };   // each product takes 0.25 s to read
 page_answers( 5, follow() );
 run_job();
 CF_TestState::$on_product_get = null;
 $sizes = array_map( function ( $p ) { return count( $p['rows'] ); }, pages() );
-ok( 'three pages: 6 s, 6 s, then the 1 s the budget still allows', $sizes === [ 24, 24, 4 ], json_encode( $sizes ) );
-ok( 'each continuing from the server\'s position', array_column( pages(), 'after_id' ) === [ 0, 124, 148 ] );
+ok( 'three pages: 3 s (the reserved first step), 6 s, then the 4 s the budget still allows',
+    $sizes === [ 12, 24, 16 ], json_encode( $sizes ) );
+ok( 'each continuing from the server\'s position', array_column( pages(), 'after_id' ) === [ 0, 112, 136 ] );
 ok( 'none claimed complete', [ false, false, false ] === array_column( pages(), 'complete' ) );
 ok( 'the list is held at 152 for the next run', ( CashFlow_Catalog::list_state()['after_id'] ?? null ) === 152 );
 
@@ -112,6 +129,9 @@ CF_TestState::$db_error_on = null;
 ok( 'no page was sent', pages() === [] );
 ok( 'the list is still held, at the same position', ( CashFlow_Catalog::list_state()['list_id'] ?? '' ) === LIST_ID && ( CashFlow_Catalog::list_state()['after_id'] ?? null ) === 0 );
 ok( 'the panel says the list stopped and why', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'product query failed' ) );
+$enum_calls = count( array_filter( CF_TestState::$sql, function ( $s ) { return 'catalog:enumerate' === $s; } ) );
+ok( 'a DB error while building costs exactly ONE attempt this run, not a repeat [task-12, IMPORTANT 2]',
+    1 === $enum_calls, (string) $enum_calls );
 
 echo "── 409: the server's position, and the server's list\n";
 store();
@@ -163,19 +183,21 @@ CF_TestState::$terms_error = null;
 ok( 'its row carries null', ( pages()[0]['rows'][1] ?? null ) === [ 13, null ] );
 
 echo "── a failed page keeps the list where it was\n";
-// Since a list ALREADY open gets the run's very first turn [task-12,
-// IMPORTANT 1], AND the ordinary hourly list_step() still runs afterwards
-// (unchanged — "then the rest as now"), an already-open list that keeps
-// failing gets tried TWICE this run (step -1, then step 2) before step 3's
-// own `idle` guard stops it going a third time. Both attempts fail the
-// same way; scripted identically so the outcome does not depend on which
-// attempt "wins".
+// One failed page attempt per run [task-12, IMPORTANT 2 — decided]: this
+// non-'page' answer (a 500, not a conflict) sets $list_page_failed_this_run
+// in step -1, so step 2's list_step() skips send_page() rather than trying
+// the same failing page again. TWO identical responses are still scripted
+// (never just one) so the assertion below proves the bound by construction
+// — if the fix regressed and a second attempt were made, it would consume
+// the second response and still land on the same message, so only the
+// explicit request-count check below can catch the regression.
 store();
 page_answers( 2, function () { return [ 'ok' => false, 'status' => 500, 'data' => [ 'error' => 'catalogue_list_failed' ] ]; } );
 run_job();
 ok( 'still held at 0, reason on the panel', ( CashFlow_Catalog::list_state()['after_id'] ?? null ) === 0
     && str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'Sending a list page failed: HTTP 500: catalogue_list_failed' ) );
-ok( 'bounded at exactly two attempts this run — step -1 and step 2, never a third', count( pages() ) === 2 );
+ok( 'bounded at exactly ONE attempt this run — step 2 does not retry a page step -1 already failed [task-12, IMPORTANT 2]',
+    count( pages() ) === 1, (string) count( pages() ) );
 
 echo "── a real refusal on the list route ends the run — no second request anywhere [task-12]\n";
 store();
@@ -196,6 +218,11 @@ $page_calls = count( array_filter( CF_TestState::$api_calls, function ( $c ) { r
 $open_calls = count( array_filter( CF_TestState::$api_calls, function ( $c ) { return '/plugin/catalog/list/open' === $c['endpoint']; } ) );
 ok( 'a server refusing every page as list_not_found still costs a handful of requests, not dozens (50 were available)',
     $page_calls + $open_calls <= 5, "page=$page_calls open=$open_calls" );
+ok( 'the capped-conflict message names the ACTUAL 409 in neutral wording [task-12, minor 1]',
+    str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'CashFlow answered list_not_found twice this run' ),
+    (string) CashFlow_Catalog::stats()['last_error'] );
+ok( 'last_list is updated to match — never left showing a stale "opened" from the reopen that preceded it [task-12, minor 1]',
+    ( CashFlow_Catalog::stats()['last_list']['result'] ?? '' ) === 'list_not_found' );
 
 store();
 for ( $i = 0; $i < 50; $i++ ) {
@@ -229,12 +256,33 @@ CF_TestState::$on_product_get = null;
 ok( 'no page was sent — there was no time left this run to send what was built', pages() === [] );
 ok( 'the panel says so, never silently', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'no time left this run to send it' ) );
 
-echo "── a 2xx with the wrong shape on list/page says so plainly, like open_list()'s own message [task-12, minor 3]\n";
+echo "── a 2xx with the wrong shape on list/page says so plainly, like open_list()'s own message [task-12, minor]\n";
+// A malformed 200 is now a 'stop', consistent with the products route
+// [task-12, second review, minor 2] — the SAME connection-level fault that
+// makes the list route answer garbage would make the products route too,
+// so this ends the WHOLE run outright (step -1 returns 'stop', work()
+// returns before drain_solo/real saves/step 2 are ever reached) — not
+// merely a gated retry via $list_page_failed_this_run, which alone (an
+// 'idle') would still let real saves proceed normally this run. Real
+// saves are queued here specifically so the two behave differently:
+// $list_page_failed_this_run gates ONLY further list attempts, but 'stop'
+// ends real-save draining too — this is the assertion that actually tells
+// the two apart (a bare "1 page request" count would pass under either).
 store();
-page_answers( 2, function () { return [ 'ok' => true, 'status' => 200, 'data' => [ 'unexpected' => true ] ]; } );
+CashFlow_Catalog::enqueue( 9001, 'save' );
+page_answers( 1, function () { return [ 'ok' => true, 'status' => 200, 'data' => [ 'unexpected' => true ] ]; } );
+// Scripted even though the CORRECT code never reaches it (a 'stop' ends
+// the run before step 1) — so a regression that lets real saves run
+// doesn't ALSO corrupt last_error via an unrelated "no scripted response"
+// failure, muddying which assertion is actually catching the regression.
+CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => true, 'status' => 200, 'data' => [ 'applied' => [], 'trashed' => [ 9001 ], 'unchanged' => [], 'warnings' => [], 'list_wanted' => false ] ];
 run_job();
 ok( 'worded the same way open_list() words its own missing-shape failure',
     str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'Sending a list page failed: CashFlow answered without a page result' ) );
+ok( 'a malformed 200 costs exactly ONE attempt on the list route',
+    count( pages() ) === 1, (string) count( pages() ) );
+ok( 'and it stops the WHOLE run — the queued real save is untouched, not merely the list route [task-12, minor 2]',
+    CashFlow_Catalog::count_pending() === 1, (string) CashFlow_Catalog::count_pending() );
 
 echo "── a need id that fails to enqueue is counted and shown, not silently dropped [task-12, minor 4]\n";
 store();
@@ -246,13 +294,22 @@ ok( 'the failed enqueues are counted on the panel, not just the raw DB reason',
     str_contains( (string) CashFlow_Catalog::stats()['last_error'], '2 asked products could not be queued' ) );
 ok( 'nothing was actually queued', CashFlow_Catalog::count_pending() === 0 );
 
-echo "── enumerate() treats a SILENT failure (no last_error) the same as one that sets it [task-12, minor 5]\n";
+echo "── enumerate() catches a get_col() that returns a non-array with no last_error set [task-12, minor — HARNESS-ONLY shape]\n";
+// CORRECTED per review: this covers a shape only the harness's
+// $db_silent_failure_on can produce (get_col() returning `false`, which
+// real \wpdb::get_col() never does — it always returns an ARRAY, even on
+// failure). It does NOT cover the realistic "not-ready-connection" case,
+// where a real failed get_col() returns [] with $wpdb->last_error ALSO
+// left empty — enumerate()'s `'' !== last_error || ! is_array($ids)` check
+// would read THAT case as "the set has no more rows" (is_array([]) is
+// true), not as a failure. That case is NOT modelled or tested here; this
+// only proves the non-array branch of the guard, nothing more.
 CF_TestState::reset();
 CF_TestState::$catalog_tables['wp_cashflow_catalog_queue'] = true;
 CF_TestState::$db_silent_failure_on = 'enumerate';
 $silent = CashFlow_Catalog::enumerate( 0, 100 );
 CF_TestState::$db_silent_failure_on = null;
-ok( 'a get_col that signals failure with no last_error still answers null, not []', $silent === null );
+ok( 'a get_col that returns a non-array with no last_error still answers null, not []', $silent === null );
 
 echo "── a DB error on a LATER chunk discards the WHOLE page, not just what failed [task-12, minor 6]\n";
 store( range( 301, 520 ), 1000 );   // 220 ids: needs more than one ENUM_CHUNK to enumerate
@@ -316,6 +373,47 @@ ok( 'tick 3: the whole real-save backlog is gone — nothing was starved for goo
     CashFlow_Catalog::count_pending() === 0, (string) CashFlow_Catalog::count_pending() );
 ok( 'tick 3: the list reaches its own end — every id in the set was still reached',
     empty( CashFlow_Catalog::list_state()['list_id'] ) && count( pages() ) === 4 );
+
+echo "── the first step leaves room for a real-save batch, even at a slow page request [task-12, IMPORTANT 1, second review]\n";
+// The reviewer's exact scenario: a page REQUEST costing ~10s, a build that
+// uses its whole (reduced) budget, and 100 real saves queued. Without the
+// REQUEST_TIMEOUT reserve on step -1's build, the first step alone could
+// consume build(6s)+request(10s)=16s, leaving under MIN_LEFT_TO_START and
+// starving every real save for the whole run — the reviewer reproduced 100
+// saves still pending after 3 runs. With the fix, step -1's build is
+// capped at (25-12-10)=3s, so even a 10s request leaves exactly 12s.
+store( range( 801, 850 ), 1000 );   // 50-id set — more than the reduced 3s budget can cover at 0.25s/product
+for ( $id = 3001; $id <= 3100; $id++ ) {
+    CashFlow_Catalog::enqueue( $id, 'save' );   // 100 real saves
+}
+CF_TestState::$on_product_get = function ( $prop ) { global $T; if ( 'name' === $prop ) { $T += 0.25; } };   // the build uses its whole budget
+page_answers( 10, slow_follow( 10.0 ) );        // the list's own request costs 10s — a slow server
+for ( $i = 0; $i < 10; $i++ ) {
+    CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => true, 'status' => 200, 'data' => [ 'applied' => [], 'trashed' => [], 'unchanged' => [], 'warnings' => [], 'list_wanted' => false ] ];
+}
+
+run_job();
+$pending0 = 100;
+$pending1 = CashFlow_Catalog::count_pending();
+ok( 'run 1: the list still gets its page', count( pages() ) >= 1 );
+ok( 'run 1: a real-save batch is STILL sent — the first step left exactly enough room',
+    $pending1 < $pending0, (string) $pending1 );
+$pages1 = count( pages() );
+
+run_job();
+$pending2 = CashFlow_Catalog::count_pending();
+ok( 'run 2: the list advances further (or has already finished)',
+    count( pages() ) > $pages1 || empty( CashFlow_Catalog::list_state()['list_id'] ) );
+ok( 'run 2: real saves keep draining', $pending2 < $pending1 || 0 === $pending1, (string) $pending2 );
+$pages2 = count( pages() );
+
+run_job();
+CF_TestState::$on_product_get = null;
+$pending3 = CashFlow_Catalog::count_pending();
+ok( 'run 3: the list is still being reached (or already finished)',
+    count( pages() ) > $pages2 || empty( CashFlow_Catalog::list_state()['list_id'] ) );
+ok( 'run 3: real saves keep draining too — every run sent at least one batch, nothing was starved',
+    $pending3 < $pending2 || 0 === $pending2, (string) $pending3 );
 
 echo "── the same, at batch costs a fixed reserve could never have covered [task-12, IMPORTANT 1]\n";
 // The reviewer reproduced 0 pages across 3 runs at a 6.5-7s or 13.5s batch

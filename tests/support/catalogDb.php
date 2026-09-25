@@ -101,12 +101,16 @@ class CF_Test_CatalogDB {
             $wpdb->last_error = 'harness: injected failure in ' . $name . ' (call ' . $call_n . ')';
             return 'query' === $method ? false : ( 'get_var' === $method ? null : [] );
         }
-        // A SILENT failure: the statement's method signals it did not work
-        // (a non-array from get_col — the real driver returning false, or
-        // something that isn't a result set) WITHOUT $wpdb->last_error ever
-        // being set. Distinct from the injected failure above, which always
-        // sets last_error — this is the rarer, defensive case a caller must
-        // still catch on the return SHAPE alone [task-12, minor].
+        // A HARNESS-ONLY silent failure: returns a non-array (`false`) with
+        // $wpdb->last_error left UNSET, so a caller must catch it on the
+        // return SHAPE alone rather than on last_error. Corrected per
+        // review [task-12, minor]: this is NOT a real \wpdb::get_col()
+        // behaviour — that method always returns an ARRAY, even on
+        // failure (typically `[]`, with last_error also left empty on some
+        // failure modes) — it exists purely to exercise enumerate()'s
+        // `! is_array($ids)` branch in isolation. It does not model, and
+        // must not be described as covering, the realistic
+        // "not-ready-connection" case (an empty array, no last_error).
         if ( $name === CF_TestState::$db_silent_failure_on ) {
             return false;
         }

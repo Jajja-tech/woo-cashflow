@@ -155,6 +155,19 @@ class CashFlow_Catalog {
      * fresh instance per tick(), like $budget_exhausted.
      */
     private $conflict_follow_ups = 0;
+    /**
+     * True once send_page() has answered anything but 'page' this run
+     * [task-12, IMPORTANT 2 — decided]: a non-409 failure, a malformed 200,
+     * a DB error while building, or a page built with no time left to send.
+     * list_step() then skips send_page() for the rest of the run rather
+     * than trying an already-failing page repeatedly (the second-409 cap
+     * already covers conflicts specifically; this covers everything else).
+     * A 409 that WAS followed returns 'page' and never sets this —
+     * a reopen after list_expired/list_not_found still happens the same
+     * run, exactly as before. A fresh instance per tick(), like
+     * $budget_exhausted.
+     */
+    private $list_page_failed_this_run = false;
 
     public function __construct() {
         // Constructed inside plugins_loaded (CashFlow_Plugin::init). A plugin
@@ -892,16 +905,34 @@ class CashFlow_Catalog {
      * (opened at step 2, after real saves), exactly as before: there is
      * nothing open yet to starve, and this must never make an ordinary
      * hourly open jump the real-save queue.
+     *
+     * 🔴 A fourth addition, task-12, second review: the FIRST step's build
+     * must itself leave room for a real save. Building a full
+     * PAGE_BUILD_SECONDS page, then sending it at up to REQUEST_TIMEOUT,
+     * can leave under MIN_LEFT_TO_START — reproduced with 100 saves still
+     * pending after 3 runs at a ~7s+ page request. So the first step's
+     * build is capped at (deadline-now)-REQUEST_TIMEOUT-MIN_LEFT_TO_START
+     * (3s at the start of a run): even a worst-case REQUEST_TIMEOUT-long
+     * send still leaves exactly MIN_LEFT_TO_START for one real-save batch
+     * to start. Step 2/3's calls are UNCHANGED — they may still build a
+     * full page when there is time.
      */
     private function work( $secret ) {
         // -1. An OPEN list goes first, unconditionally [task-12, IMPORTANT
-        //     1] — before solo, before real saves. A 'stop' here ends the
-        //     run exactly like any other 'stop'; anything else (a page sent,
-        //     a conflict followed, no budget to even try) falls through to
-        //     the rest of the run unchanged.
+        //     1] — before solo, before real saves. Its build is capped so a
+        //     real-save batch always has room afterward [IMPORTANT 1,
+        //     second review]. A 'stop' here ends the run exactly like any
+        //     other 'stop'; anything else (a page sent, a conflict followed,
+        //     no budget to even try) falls through to the rest of the run
+        //     unchanged. Any non-'page' answer marks the run's one failed
+        //     page attempt [IMPORTANT 2], so list_step() will not try again.
         $open = self::list_state();
         if ( ! empty( $open['list_id'] ) && $this->can_start() ) {
-            if ( 'stop' === $this->send_page( $secret, $open ) ) {
+            $r = $this->send_page( $secret, $open, self::REQUEST_TIMEOUT );
+            if ( 'page' !== $r ) {
+                $this->list_page_failed_this_run = true;
+            }
+            if ( 'stop' === $r ) {
                 return;
             }
         }
@@ -1604,9 +1635,27 @@ class CashFlow_Catalog {
         }
         $st = self::list_state();
         if ( empty( $st['list_id'] ) ) {
+            // Opening is NOT gated by $list_page_failed_this_run [task-12,
+            // IMPORTANT 2 — decided]: a 409 that was followed (list_expired
+            // / list_not_found) clears list_id and returns 'page', never
+            // setting the flag, so the reopen it primes still happens this
+            // run exactly as before.
             return self::list_due( $st ) ? $this->open_list( $secret, $st ) : 'idle';
         }
-        return $this->send_page( $secret, $st );
+        if ( $this->list_page_failed_this_run ) {
+            // One failed page attempt per run [task-12, IMPORTANT 2]: a
+            // prior non-'page' answer (a real refusal, a malformed 200, a
+            // DB error while building, or built-but-no-time) already used
+            // this run's one try. Trying an already-failing page again
+            // costs a request for no better odds; the same page is due
+            // again next run regardless.
+            return 'idle';
+        }
+        $r = $this->send_page( $secret, $st );
+        if ( 'page' !== $r ) {
+            $this->list_page_failed_this_run = true;
+        }
+        return $r;
     }
 
     /** Once an hour, or at once when the server asked — but never before a "later" has passed. */
@@ -1689,19 +1738,33 @@ class CashFlow_Catalog {
 
     /**
      * Send one page of the open list, sized by TIME [NB2]: as many
-     * [id, fingerprint] rows as can be built in PAGE_BUILD_SECONDS. Follows
-     * the server on EVERY answer [N4] — a 409 re-sends from the position
-     * (or the list) the server names; a 2xx counts as success only through
-     * has_page_shape(), via the SAME classify() the other two routes use —
-     * one status table, three shape checks [override #2]. A good 2xx clears
-     * a stale refusal exactly as a real send does; a refusal goes through
-     * the same note_failure()/describe_connection_refusal() so the panel's
-     * wording matches.
+     * [id, fingerprint] rows as can be built in at most PAGE_BUILD_SECONDS.
+     * Follows the server on EVERY answer [N4] — a 409 re-sends from the
+     * position (or the list) the server names; a 2xx counts as success only
+     * through has_page_shape(), via the SAME classify() the other two
+     * routes use — one status table, three shape checks [override #2]. A
+     * good 2xx clears a stale refusal exactly as a real send does; a
+     * refusal goes through the same note_failure()/describe_connection_refusal()
+     * so the panel's wording matches.
+     *
+     * $extra_reserve [task-12, IMPORTANT 1, second review]: how much of
+     * MIN_LEFT_TO_START's usual margin to reserve TWICE over — passed only
+     * by work()'s step -1, the run's first call, as self::REQUEST_TIMEOUT.
+     * A page built at the ordinary full PAGE_BUILD_SECONDS and then sent at
+     * up to REQUEST_TIMEOUT can leave under MIN_LEFT_TO_START for anything
+     * after it — reproduced with 100 real saves still pending after 3 runs
+     * at a page request costing ~7s or more. Reserving REQUEST_TIMEOUT on
+     * top of the normal margin caps the FIRST step's build at
+     * (deadline-now)-REQUEST_TIMEOUT-MIN_LEFT_TO_START (3s at a run's very
+     * start): even a worst-case-length send still leaves exactly
+     * MIN_LEFT_TO_START for one real-save batch to start. Every other
+     * caller (step 2/3, via list_step()) passes 0 — unchanged, a full page
+     * when there is time.
      */
-    private function send_page( $secret, array $st ) {
+    private function send_page( $secret, array $st, $extra_reserve = 0 ) {
         // Build for at most PAGE_BUILD_SECONDS, and never so long that the
         // page could not be sent afterwards (a request needs MIN_LEFT_TO_START).
-        $budget = min( self::PAGE_BUILD_SECONDS, ( $this->deadline - self::now() ) - self::MIN_LEFT_TO_START );
+        $budget = min( self::PAGE_BUILD_SECONDS, ( $this->deadline - self::now() ) - self::MIN_LEFT_TO_START - $extra_reserve );
         if ( $budget <= 0 ) {
             return 'idle';
         }
@@ -1733,24 +1796,32 @@ class CashFlow_Catalog {
             'complete' => $page['complete'],
         ] ) );
         if ( 409 === (int) ( $res['status'] ?? 0 ) ) {
+            $d = is_array( $res['data'] ?? null ) ? $res['data'] : [];
             // At most ONE conflict followed per run [task-12, IMPORTANT 2] —
             // see $conflict_follow_ups. A second 409 this run, whatever its
-            // cause, is left exactly where it is: no state change, one note.
+            // cause, is left exactly where it is: no state change, one note
+            // naming the actual reason, and the panel's own list result
+            // updated to match [task-12, minor — a stale "trashed"/"opened"
+            // from an earlier attempt must not sit there implying success].
             if ( $this->conflict_follow_ups >= 1 ) {
-                self::note_error( 'CashFlow keeps refusing this list\'s position; leaving it for the next run rather than looping' );
+                $err = (string) ( $d['error'] ?? '' );
+                self::note_error( 'CashFlow answered ' . ( '' !== $err ? $err : 'a conflict' ) . ' twice this run; the list will be tried again next run' );
+                self::update_stats( [ 'last_list' => [ 'result' => '' !== $err ? $err : 'conflict', 'at' => self::now_iso() ] ] );
                 return 'idle';
             }
             $this->conflict_follow_ups++;
-            return $this->follow_conflict( $st, is_array( $res['data'] ?? null ) ? $res['data'] : [] );
+            return $this->follow_conflict( $st, $d );
         }
         $class = self::classify( $res, [ __CLASS__, 'has_page_shape' ] );
         if ( 'stop' === $class && ! empty( $res['ok'] ) ) {
-            // A 2xx, but neither of has_page_shape()'s required fields — the
-            // same rule as open_list()/the products route: never read as
-            // "no ids needed, the page landed" [task-12, minor — matches
-            // open_list()'s own wording for the same failure shape].
+            // A 2xx, but neither of has_page_shape()'s required fields —
+            // 'stop', consistent with the products route's own handling of
+            // this exact shape [task-12, minor] (send_split() returns
+            // 'stop' for ANY malformed 2xx, never "nothing happened here").
+            // The wording still matches open_list()'s for the identical
+            // failure shape.
             self::note_error( 'Sending a list page failed: CashFlow answered without a page result' );
-            return 'idle';
+            return 'stop';
         }
         if ( 'ok' !== $class ) {
             self::note_failure( 'Sending a list page', $res );

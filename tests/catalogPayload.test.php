@@ -77,6 +77,36 @@ ok( 'stock is a number and managed', $f['stock_quantity'] === 5 && $f['manage_st
 ok( 'the sale end is zone-less UTC', $f['date_on_sale_to_gmt'] === '2026-09-30T18:59:59' );
 ok( 'a sale date that is not a date is null', CashFlow_Catalog::payload( scarf( [ 'date_on_sale_from' => 'soon' ] ) )['fields']['date_on_sale_from_gmt'] === null );
 
+echo "── the image src is independent of is_ssl()/is_admin() [review, Important]\n";
+// Action Scheduler runs the catalogue job both through WP-Cron (is_ssl varies,
+// is_admin false) and through admin-ajax (is_admin true). Core's own
+// wp_get_attachment_url() upgrades http → https only when is_ssl() &&
+// !is_admin(), so the SAME stored (http) attachment answers differently
+// depending on which runner asked — unless the payload forces a scheme
+// independent of the request. A store like 1shop.pk (siteurl http, home
+// https) hits this on every ordinary product.
+shop();
+CF_TestState::$attachments[558] = 'http://1shop.pk/wp-content/uploads/2026/09/y.png';
+CF_TestState::$is_ssl = true;  CF_TestState::$is_admin = false;   // WP-Cron: is_ssl varies, never admin
+$via_cron = CashFlow_Catalog::payload( scarf( [ 'image_id' => 558 ] ) );
+CF_TestState::$is_ssl = false; CF_TestState::$is_admin = true;    // admin-ajax: always admin
+$via_ajax = CashFlow_Catalog::payload( scarf( [ 'image_id' => 558 ] ) );
+CF_TestState::$is_ssl = false; CF_TestState::$is_admin = false;   // restore
+ok( 'the same image src whichever runner built it', $via_cron['fields']['images'] === $via_ajax['fields']['images'],
+    json_encode( [ 'cron' => $via_cron['fields']['images'], 'ajax' => $via_ajax['fields']['images'] ] ) );
+ok( 'and therefore the same fingerprint (no needless resend)', $via_cron['fingerprint'] === $via_ajax['fingerprint'] );
+ok( 'the src takes home_url()\'s scheme, not the request\'s',
+    $via_cron['fields']['images'] === [ [ 'src' => 'https://1shop.pk/wp-content/uploads/2026/09/y.png' ] ] );
+
+echo "── a variable parent's own price fields, as WooCommerce reports them [review, Minor]\n";
+shop();
+$vp = CashFlow_Catalog::payload( scarf( [
+    'type' => 'variable', 'regular_price' => '', 'sale_price' => '', 'price' => '450', 'children' => [ 30, 20 ],
+] ) )['fields'];
+ok( 'regular_price and sale_price are empty (a variable parent carries none of its own)', $vp['regular_price'] === '' && $vp['sale_price'] === '' );
+ok( 'price is whatever WooCommerce reports (its active range)', $vp['price'] === '450' );
+ok( 'and its variation ids, ascending', $vp['variations'] === [ 20, 30 ] );
+
 echo "── sizes are capped in the plugin, at the server's own cuts [NB7]\n";
 shop();
 for ( $i = 1; $i <= 150; $i++ ) {
@@ -91,6 +121,8 @@ ok( 'sku cut to 100', strlen( $big['sku'] ) === 100 );
 ok( 'a number string cut to 40', strlen( $big['regular_price'] ) === 40 );
 ok( 'at most 100 categories, each name cut to 200', count( $big['categories'] ) === 100 && mb_strlen( $big['categories'][0]['name'] ) === 200 );
 ok( 'at most 1,000 variations', count( $big['variations'] ) === 1000 );
+ok( 'a price over the cap is CUT to 40 characters, never sent empty [review, Minor]',
+    strlen( $big['regular_price'] ) === 40 && $big['regular_price'] !== '' );
 
 echo "── bad bytes never reach the wire [NB7]\n";
 shop();

@@ -437,6 +437,20 @@ class CashFlow_Catalog {
             $image_id = isset( $gallery[0] ) ? (int) $gallery[0] : 0;
         }
         $src = $image_id > 0 ? wp_get_attachment_url( $image_id ) : false;
+        if ( is_string( $src ) && '' !== $src ) {
+            // wp_get_attachment_url() upgrades http → https only when
+            // is_ssl() && !is_admin() — a fact of THIS request, not of the
+            // site. Action Scheduler runs the catalogue job through both
+            // WP-Cron (never admin) and admin-ajax (always admin), so the
+            // SAME product would fingerprint differently depending on which
+            // one happened to build it, and the hourly list would resend it
+            // forever for no reason. Force the scheme to the site's own
+            // home_url() scheme instead, independent of the request.
+            $home_scheme = wp_parse_url( home_url(), PHP_URL_SCHEME );
+            if ( in_array( $home_scheme, [ 'http', 'https' ], true ) ) {
+                $src = set_url_scheme( $src, $home_scheme );
+            }
+        }
         $src = is_string( $src ) ? self::clean( $src ) : '';
         // Like the server: a URL over 2,048 characters is dropped, never cut — a cut URL is a broken one.
         $images = ( '' !== $src && mb_strlen( $src, 'UTF-8' ) <= self::CAP_IMAGE_URL ) ? [ [ 'src' => $src ] ] : [];

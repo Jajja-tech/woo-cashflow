@@ -51,7 +51,9 @@ class CF_TestState {
     public static array $posts = [];          // id => [ 'type', 'status', 'parent' ] — the wp_posts rows that matter
     public static array $terms = [];          // term_id => (object) [ term_id, name, slug, taxonomy, count ]
     public static ?string $terms_error = null; // set: get_terms answers WP_Error, as core does on a DB failure
-    public static array $attachments = [];    // attachment id => url
+    public static array $attachments = [];    // attachment id => url (as STORED, before any scheme upgrade)
+    public static bool  $is_ssl = false;      // is_ssl(): a REQUEST fact, not a site setting
+    public static bool  $is_admin = false;    // is_admin(): true inside admin-ajax, e.g. Action Scheduler's async runner
     public static int   $cache_flushes = 0;
     public static array $product_reads = [];  // every WC_Product getter read: [ prop, context ]
     public static $on_product_get = null;     // callable( string $prop, WC_Product ): runs inside every getter
@@ -87,6 +89,8 @@ class CF_TestState {
         self::$terms = [];
         self::$terms_error = null;
         self::$attachments = [];
+        self::$is_ssl = false;
+        self::$is_admin = false;
         self::$cache_flushes = 0;
         self::$product_reads = [];
         self::$on_product_get = null;
@@ -104,7 +108,22 @@ class CF_TestState {
 function add_action( $hook, $cb = null, $prio = 10, $args = 1 ) { CF_TestState::$actions[ $hook ][] = [ $cb, $prio, $args ]; return true; }
 function get_post_type( $post = null ) { return CF_TestState::$posts[ (int) $post ]['type'] ?? false; }
 function wp_get_post_parent_id( $post = null ) { return (int) ( CF_TestState::$posts[ (int) $post ]['parent'] ?? 0 ); }
-function wp_get_attachment_url( $id = 0 ) { return CF_TestState::$attachments[ (int) $id ] ?? false; }
+/**
+ * Core's wp_get_attachment_url() upgrades an http URL to https when
+ * is_ssl() && ! is_admin() — a REQUEST fact, not a site setting. Action
+ * Scheduler runs jobs through BOTH WP-Cron (not admin) and admin-ajax
+ * (admin), so the identical stored URL can come back different depending on
+ * which runner is asking. Modelled faithfully so a caller that does not
+ * force an independent scheme can be caught disagreeing with itself.
+ */
+function wp_get_attachment_url( $id = 0 ) {
+    $url = CF_TestState::$attachments[ (int) $id ] ?? false;
+    if ( false === $url ) { return false; }
+    if ( 'https' !== substr( $url, 0, 5 ) && is_ssl() && ! is_admin() ) {
+        $url = set_url_scheme( $url, 'https' );
+    }
+    return $url;
+}
 function wp_cache_flush_runtime() { CF_TestState::$cache_flushes++; return true; }
 function delete_option( $k ) { unset( CF_TestState::$options[ $k ] ); return true; }
 
@@ -171,8 +190,29 @@ function dbDelta( $queries = '', $execute = true ) {
 function add_filter( $hook, $cb = null, $prio = 10, $args = 1 ) { CF_TestState::$filters[ $hook ][] = $cb; return true; }
 function sanitize_text_field( $s ) { return trim( strip_tags( (string) $s ) ); }
 function wp_unslash( $v ) { return $v; }
-function home_url() { return 'https://example.test'; }
+/** Core's home_url( $path = '', $scheme = null ). Only the no-argument form is modelled. */
+function home_url( $path = '', $scheme = null ) {
+    if ( '' !== $path || null !== $scheme ) {
+        throw new RuntimeException( 'harness: home_url() with a path or scheme argument is not modelled' );
+    }
+    return 'https://example.test';
+}
 function wp_parse_url( $u, $c = -1 ) { return parse_url( $u, $c ); }
+function is_ssl() { return CF_TestState::$is_ssl; }
+function is_admin() { return CF_TestState::$is_admin; }
+/**
+ * Core's set_url_scheme, modelled only for the two schemes this codebase
+ * ever asks for ('http'/'https'). null (meaning "the current request's
+ * scheme"), 'relative', 'admin' and friends are NOT modelled and throw, so a
+ * caller relying on behaviour this stub does not reproduce fails loudly
+ * rather than silently passing.
+ */
+function set_url_scheme( $url, $scheme = null ) {
+    if ( ! in_array( $scheme, [ 'http', 'https' ], true ) ) {
+        throw new RuntimeException( 'harness: set_url_scheme() with scheme ' . var_export( $scheme, true ) . ' is not modelled' );
+    }
+    return preg_replace( '#^\w+://#', $scheme . '://', trim( (string) $url ) );
+}
 function get_option( $k, $d = false ) { return CF_TestState::$options[ $k ] ?? $d; }
 function update_option( $k, $v ) { CF_TestState::$options[ $k ] = $v; return true; }
 function get_site_url() { return 'https://example.test'; }

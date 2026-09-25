@@ -47,6 +47,19 @@ class CashFlow_Catalog {
     const EP_PAGE            = '/plugin/catalog/list/page';
     const LIST_EVERY_SECONDS = 3600;
     const MAX_LIST_ROWS      = 1000;
+    const PAGE_BUILD_SECONDS = 6;     // a page is as many products as can be read in this long [NB2]
+    const ENUM_CHUNK         = 100;   // ids per enumeration query; the object cache is flushed between chunks
+    /**
+     * When a list is open, the real-save phase [B2, review, task-12] must
+     * leave at least this much of the run's budget behind before it starts
+     * one more batch — enough for send_page() to both START a request
+     * (MIN_LEFT_TO_START) and actually BUILD something with it
+     * (PAGE_BUILD_SECONDS), not merely be called with a budget of ~0. A
+     * bulk edit that keeps 200 real saves due, run after run, must never
+     * be able to spend the WHOLE budget every single run: an open list
+     * left untouched for long enough idles out on the server (15 minutes).
+     */
+    const LIST_RESERVE_SECONDS = self::PAGE_BUILD_SECONDS + self::MIN_LEFT_TO_START;
     /**
      * Ids a SPLIT left unsent because the run's budget ran out mid-recursion
      * [CRITICAL, review-3]. Without this, a slow server plus one poisoned
@@ -833,6 +846,28 @@ class CashFlow_Catalog {
     }
 
     /**
+     * True once continuing the real-save phase would risk leaving no real
+     * budget for a list-page request this run [task-12, new requirement]. A
+     * long queue of real saves (a bulk edit) can otherwise use the WHOLE
+     * budget, run after run, so the list step (work()'s step 2) never runs
+     * at all and an OPEN list idles out on the server (15 minutes) with
+     * nothing ever advancing it. Checked only when a list is actually open
+     * — an idle list (none open) has nothing to starve, and this changes
+     * nothing about the ordinary hourly-open path (steps 2/3). Reserved:
+     * LIST_RESERVE_SECONDS, the same budget send_page() itself needs to
+     * make REAL progress, not merely to be callable — MIN_LEFT_TO_START
+     * alone would let list_step() start but hand send_page() a budget of
+     * ~0, sending nothing and leaving the list exactly as starved.
+     */
+    private function should_yield_to_list() {
+        $st = self::list_state();
+        if ( empty( $st['list_id'] ) ) {
+            return false;
+        }
+        return ( $this->deadline - self::now() ) < self::LIST_RESERVE_SECONDS;
+    }
+
+    /**
      * [B2, N3, S9, NB3] The brief's own work() replacement was right about
      * the real-save loop and wrong about only one thing: it did not carry
      * drain_solo() forward at all. That is the ONE deviation kept here —
@@ -862,6 +897,14 @@ class CashFlow_Catalog {
      * 2xx (has_shape()-shaped) carrying it — see "real saves still go
      * first, and list_wanted from a real save opens the list in the same
      * run".
+     *
+     * 🔴 A third addition, task-12: real saves no longer drain to
+     * exhaustion when a list is open. should_yield_to_list() breaks step 1
+     * early, with LIST_RESERVE_SECONDS still in hand, so step 2 always gets
+     * a real chance this run — a long real-save backlog (a bulk edit) must
+     * never be able to starve an open list into idling out on the server
+     * (15 minutes) simply by never finishing. See "a long real-save queue
+     * does not starve an open list".
      */
     private function work( $secret ) {
         // 0. Ids a PRIOR run's budget cut short, one at a time, before any
@@ -874,7 +917,13 @@ class CashFlow_Catalog {
         //    stop. A stop here — for any reason, budget or a wire refusal —
         //    ends the run: the list route shares the same connection and
         //    the same per-IP ceiling, so a refusal there refuses here too.
+        //    When a list is open, this phase yields EARLY — with enough
+        //    budget still in hand for step 2 to make real progress — rather
+        //    than draining every due real save first [task-12].
         while ( true ) {
+            if ( $this->should_yield_to_list() ) {
+                break;
+            }
             $d = $this->drain( $secret, true );
             if ( 'stop' === $d ) {
                 return;
@@ -1156,6 +1205,29 @@ class CashFlow_Catalog {
         }
         return isset( $data['list_id'] ) && is_string( $data['list_id'] ) && '' !== $data['list_id']
             && array_key_exists( 'after_id', $data ) && array_key_exists( 'page_size', $data );
+    }
+
+    /**
+     * The list/page equivalent of has_shape()/has_open_shape() [override #2,
+     * task-12]. A 2xx from that route counts as success only when it carries
+     * the page reply's own minimum shape, as the wire contract names it: an
+     * array of ids CashFlow lacks (`need`), the new numeric position
+     * (`after_id`), and a boolean `complete` — `complete` is checked
+     * strictly as a bool because the wire genuinely answers both `true` and
+     * `false` and either is a real page; only something that is neither is
+     * a failure. A 2xx missing any of these — no body, a null body, an HTML
+     * error page answering `ok:true` — must never be read as "no ids
+     * needed, the page landed": that is exactly the shape that would move
+     * the plugin's position on nothing and later hand the server a
+     * position it never actually reached.
+     */
+    public static function has_page_shape( $data ) {
+        if ( ! is_array( $data ) ) {
+            return false;
+        }
+        return isset( $data['need'] ) && is_array( $data['need'] )
+            && array_key_exists( 'after_id', $data ) && is_numeric( $data['after_id'] )
+            && array_key_exists( 'complete', $data ) && is_bool( $data['complete'] );
     }
 
     /** One of the three codes the wire promises means a 500 is the server's OWN fault [IMPORTANT 1]. */
@@ -1624,8 +1696,143 @@ class CashFlow_Catalog {
         return 'opened';
     }
 
+    /**
+     * Send one page of the open list, sized by TIME [NB2]: as many
+     * [id, fingerprint] rows as can be built in PAGE_BUILD_SECONDS. Follows
+     * the server on EVERY answer [N4] — a 409 re-sends from the position
+     * (or the list) the server names; a 2xx counts as success only through
+     * has_page_shape(), via the SAME classify() the other two routes use —
+     * one status table, three shape checks [override #2]. A good 2xx clears
+     * a stale refusal exactly as a real send does; a refusal goes through
+     * the same note_failure()/describe_connection_refusal() so the panel's
+     * wording matches.
+     */
     private function send_page( $secret, array $st ) {
-        return 'idle';
+        // Build for at most PAGE_BUILD_SECONDS, and never so long that the
+        // page could not be sent afterwards (a request needs MIN_LEFT_TO_START).
+        $budget = min( self::PAGE_BUILD_SECONDS, ( $this->deadline - self::now() ) - self::MIN_LEFT_TO_START );
+        if ( $budget <= 0 ) {
+            return 'idle';
+        }
+        $after = max( 0, (int) ( $st['after_id'] ?? 0 ) );
+        $page  = $this->build_page( $after, (int) ( $st['page_size'] ?? self::MAX_LIST_ROWS ), $budget );
+        if ( null === $page ) {
+            return 'idle';   // noted; the same page is built again on the next run
+        }
+        if ( ! $this->can_start() ) {
+            return 'idle';
+        }
+        $res = $this->post( $secret, self::EP_PAGE, self::encode( [
+            'site'     => self::site(),
+            'list_id'  => (string) $st['list_id'],
+            'after_id' => $after,
+            'rows'     => $page['rows'],
+            'complete' => $page['complete'],
+        ] ) );
+        if ( 409 === (int) ( $res['status'] ?? 0 ) ) {
+            return $this->follow_conflict( $st, is_array( $res['data'] ?? null ) ? $res['data'] : [] );
+        }
+        $class = self::classify( $res, [ __CLASS__, 'has_page_shape' ] );
+        if ( 'ok' !== $class ) {
+            self::note_failure( 'Sending a list page', $res );
+            return 'stop' === $class ? 'stop' : 'idle';
+        }
+        self::clear_refusal();
+        $d = is_array( $res['data'] ) ? $res['data'] : [];
+
+        // What CashFlow lacks, holds differently, holds without a fingerprint, or
+        // holds as trash while the shop lists it live. Queued as `asked`, which
+        // the queue sends after every real save [review-2].
+        $asked = 0;
+        foreach ( (array) ( $d['need'] ?? [] ) as $id ) {
+            if ( is_numeric( $id ) && (int) $id > 0 && self::enqueue( (int) $id, 'asked' ) ) {
+                $asked++;
+            }
+        }
+        $st['asked'] = (int) ( $st['asked'] ?? 0 ) + $asked;
+
+        if ( ! empty( $d['complete'] ) ) {
+            self::save_list_state( [ 'last_opened_at' => (float) ( $st['last_opened_at'] ?? self::now() ) ] );
+            self::update_stats( [ 'last_list' => [
+                'result'        => is_string( $d['outcome'] ?? null ) ? $d['outcome'] : 'complete',
+                'trashed'       => (int) ( $d['trashed'] ?? 0 ),
+                'trash_refused' => ! empty( $d['trash_refused'] ),
+                'asked'         => $st['asked'],
+                'at'            => self::now_iso(),
+            ] ] );
+            return 'page';
+        }
+        // The server's position, not ours [N4].
+        $st['after_id'] = ( isset( $d['after_id'] ) && is_numeric( $d['after_id'] ) ) ? max( 0, (int) $d['after_id'] ) : $page['last_id'];
+        self::save_list_state( $st );
+        return 'page';
+    }
+
+    /**
+     * One page of [id, fingerprint], ascending, sized by TIME not count [NB2].
+     * null on a database error: the list stops, and is never sent an empty or
+     * short page that the server could take as "these products are gone". [NB3]
+     */
+    private function build_page( $after_id, $page_size, $budget ) {
+        global $wpdb;
+        $start    = self::now();
+        $rows     = [];
+        $cursor   = (int) $after_id;
+        $complete = false;
+        while ( count( $rows ) < $page_size ) {
+            $want = min( self::ENUM_CHUNK, $page_size - count( $rows ) );
+            $ids  = self::enumerate( $cursor, $want );
+            if ( null === $ids ) {
+                self::note_error( 'The hourly list stopped: the product query failed (' . $wpdb->last_error . '). Nothing was sent.' );
+                return null;
+            }
+            $out_of_time = false;
+            foreach ( $ids as $id ) {
+                $rows[] = [ $id, self::fingerprint_of( $id ) ];
+                $cursor = $id;
+                if ( self::now() - $start >= $budget ) {
+                    $out_of_time = true;
+                    break;
+                }
+            }
+            self::flush_cache();
+            if ( $out_of_time ) {
+                break;
+            }
+            if ( count( $ids ) < $want ) {
+                $complete = true;   // the set is exhausted: this is the last page
+                break;
+            }
+        }
+        return [ 'rows' => $rows, 'complete' => $complete, 'last_id' => $cursor ];
+    }
+
+    /** The fingerprint a send would carry now — the same builder. null if unreadable: the server then asks for it. */
+    private static function fingerprint_of( $id ) {
+        try {
+            $product = wc_get_product( $id );
+            return $product ? self::payload( $product )['fingerprint'] : null;
+        } catch ( Throwable $e ) {
+            return null;
+        }
+    }
+
+    /** A 409: do what the server says. The plugin keeps no list state it cannot lose. [N4] */
+    private function follow_conflict( array $st, array $d ) {
+        $err = (string) ( $d['error'] ?? '' );
+        if ( 'position_mismatch' === $err && isset( $d['expected_after_id'] ) && is_numeric( $d['expected_after_id'] ) ) {
+            $st['after_id'] = max( 0, (int) $d['expected_after_id'] );
+            self::save_list_state( $st );
+            return 'page';
+        }
+        // list_expired / list_not_found: open a new one now. list_closed: it
+        // already completed — the next one is due on the hourly timer.
+        self::save_list_state( [
+            'last_opened_at' => (float) ( $st['last_opened_at'] ?? self::now() ),
+            'wanted'         => 'list_closed' !== $err,
+        ] );
+        self::update_stats( [ 'last_list' => [ 'result' => '' !== $err ? $err : 'conflict', 'at' => self::now_iso() ] ] );
+        return 'page';
     }
 
     // ── The solo list [CRITICAL, review-3] ───────────────────────────

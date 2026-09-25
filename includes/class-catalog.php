@@ -195,11 +195,12 @@ class CashFlow_Catalog {
             // plugin's pre_get_posts / posts_where filters can shorten a WP_Query,
             // and a shortened list would TRASH the products it left out.
             'enumerate'       => "SELECT ID FROM {p} WHERE post_type = 'product' AND post_status IN ({set}) AND ID > %d ORDER BY ID ASC LIMIT %d",
-            // Which of the listed ids still have ANY row at all (any reason,
-            // parked or not) — how a solo id is dropped when nothing sent it
-            // and nothing failed it either: its row is simply gone
-            // [CRITICAL, review-4]. A plain SELECT: never claims, never mutates.
-            'exists_listed'   => 'SELECT DISTINCT product_id FROM {q} WHERE product_id IN ({ids})',
+            // Which of the listed ids still have an UNPARKED row — how a
+            // solo id leaves the list once nothing more can ever happen to
+            // it: either its row is simply gone [CRITICAL, review-4], or it
+            // is parked, a resolved terminal state of its own [review-5]. A
+            // plain SELECT: never claims, never mutates.
+            'exists_listed'   => 'SELECT DISTINCT product_id FROM {q} WHERE product_id IN ({ids}) AND parked_at IS NULL',
         ];
         if ( ! isset( $templates[ $name ] ) ) {
             throw new InvalidArgumentException( 'Unknown catalogue statement: ' . $name );
@@ -351,10 +352,11 @@ class CashFlow_Catalog {
     }
 
     /**
-     * Which of $ids still have ANY row at all (any reason, parked or not).
-     * Never claims, never mutates — how the solo list drops an id that
-     * nothing ever sent and nothing ever failed: its row is simply gone.
-     * [CRITICAL, review-4] null on a database failure, same contract as claim().
+     * Which of $ids still have an UNPARKED row. Never claims, never mutates
+     * — how the solo list drops an id nothing can happen to any more: either
+     * its row is simply gone [CRITICAL, review-4], or it is parked — a
+     * resolved terminal state, not "still queued" [review-5]. null on a
+     * database failure, same contract as claim().
      */
     public static function still_queued( array $ids ) {
         global $wpdb;
@@ -1068,6 +1070,28 @@ class CashFlow_Catalog {
     }
 
     /**
+     * A `classify()` 'stop' that is a real connection-level refusal — 401,
+     * or 403 site_mismatch/connection_not_eligible, or 429 — as opposed to
+     * everything else classify() also calls 'stop' (an unrecognised 5xx, a
+     * transport failure, a 2xx without the expected shape). Used ONLY by the
+     * corroborating empty-products ping [review-5]: that refusal is real and
+     * must go through note_failure() like any other stop, never be called an
+     * outage — only a 5xx, a network failure, or a malformed 2xx is one.
+     */
+    private static function is_connection_refusal( array $res ) {
+        $code = (int) ( $res['status'] ?? 0 );
+        if ( 401 === $code || 429 === $code ) {
+            return true;
+        }
+        if ( 403 === $code ) {
+            $data  = is_array( $res['data'] ?? null ) ? $res['data'] : [];
+            $error = is_string( $data['error'] ?? null ) ? $data['error'] : '';
+            return in_array( $error, [ 'site_mismatch', 'connection_not_eligible' ], true );
+        }
+        return false;
+    }
+
+    /**
      * What an answer means for the rows in the body — the wire's refusal table
      * [wire-contract.md, "Refusals common to all three routes"]:
      *   'ok'        A 2xx carrying the contract's shape (has_shape()). A 2xx
@@ -1241,10 +1265,15 @@ class CashFlow_Catalog {
             self::release_entries( $entries, $token );
             return 'stop';
         }
-        $ping = $this->post( $secret, self::EP_PRODUCTS, self::encode( [ 'site' => self::site(), 'products' => [] ] ) );
-        if ( 'ok' === self::classify( $ping ) ) {
+        $ping  = $this->post( $secret, self::EP_PRODUCTS, self::encode( [ 'site' => self::site(), 'products' => [] ] ) );
+        $class = self::classify( $ping );
+        if ( 'ok' === $class ) {
             // The server answered a request correctly: it is up, so this
-            // product's OWN 500 is its own fault, not an outage.
+            // product's OWN 500 is its own fault, not an outage — exactly
+            // like a real send, this also clears any stale refusal and
+            // honours a list request [review-5].
+            self::clear_refusal();
+            self::note_list_wanted( $ping['data'] ?? null );
             $outcome = self::fail_all( $entries, $token );
             if ( ! $outcome['any_error'] ) {
                 self::note_failure( 'Sending product ' . $entries[0]['id']
@@ -1252,10 +1281,20 @@ class CashFlow_Catalog {
             }
             return 'failed';
         }
-        // The empty request failed too [IMPORTANT 2]: an outage, not this
-        // product's fault. This IS the panel's last word for the run — the
-        // 'stop' below ends it here, and run()'s solo note only ever fires
-        // from $cut_short_ids, which this path never touches.
+        if ( self::is_connection_refusal( $ping ) ) {
+            // [review-5] A real connection-level refusal on the ping (401,
+            // 403 site_mismatch/connection_not_eligible, 429) is not an
+            // outage — it is handled exactly as any other stop: recorded,
+            // named, never blamed on the product.
+            self::release_entries( $entries, $token );
+            self::note_failure( 'Sending product ' . $entries[0]['id'], $ping );
+            return 'stop';
+        }
+        // Only a 5xx, a network failure, or a malformed 2xx reaches here
+        // [IMPORTANT 2]: an outage, not this product's fault. This IS the
+        // panel's last word for the run — the 'stop' below ends it here, and
+        // run()'s solo note only ever fires from $cut_short_ids, which this
+        // path never touches.
         self::release_entries( $entries, $token );
         self::note_error( 'Sending product ' . $entries[0]['id'] . ' failed: ' . self::describe_connection_refusal( $res )
             . ' — CashFlow did not answer an empty request either: an outage, not this product, no try counted' );
@@ -1279,6 +1318,17 @@ class CashFlow_Catalog {
             'last_warnings' => is_array( $d['warnings'] ?? null ) ? count( $d['warnings'] ) : 0,
         ] );
         self::clear_refusal();
+        self::note_list_wanted( $d );
+    }
+
+    /**
+     * Any 2xx catalogue-route reply that asks for a list marks one wanted —
+     * a real send or the corroborating empty ping alike [review-5]: both
+     * prove the connection and reach the same server, so both are equally
+     * good evidence a list is due.
+     */
+    private static function note_list_wanted( $data ) {
+        $d = is_array( $data ) ? $data : [];
         if ( ! empty( $d['list_wanted'] ) ) {
             $st = self::list_state();
             if ( empty( $st['list_id'] ) ) {

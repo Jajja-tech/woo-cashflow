@@ -145,5 +145,15 @@ function cf_queue_scenarios( array $env ): void {
     ok( 'exactly the ids that have a row, id 7 never existed', $present === [ 5, 6 ] );
     ok( 'nothing was claimed or changed by asking', $env['rows']() === $before );
 
+    echo "── still_queued() ignores a PARKED row — a parked id must be free to leave the solo list [review-5]\n";
+    $env['reset']();
+    CashFlow_Catalog::enqueue( 8, 'save' );
+    CashFlow_Catalog::park_row( $first( CashFlow_Catalog::claim( 'pk1', 25, true ) ), 'pk1', 5 );
+    ok( 'a parked row still exists, but is never "still queued"', CashFlow_Catalog::still_queued( [ 8 ] ) === [] );
+    ok( 'an unparked sibling row for the same id is still reported', ( function () {
+        CashFlow_Catalog::enqueue( 8, 'save' );
+        return CashFlow_Catalog::still_queued( [ 8 ] ) === [ 8 ];
+    } )() );
+
     CashFlow_Catalog::$clock = null;
 }

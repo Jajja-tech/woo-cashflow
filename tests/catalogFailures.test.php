@@ -355,6 +355,40 @@ ok( 'the ping also failed: no try counted, an outage', '0' === ( row_of( 6502 )[
 ok( '"outage" appears ONLY because the empty request also failed', str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'outage' )
     && str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'did not answer an empty request either' ) );
 
+echo "── review-5: a 4xx on the corroborating ping is a real refusal, never called an outage\n";
+store();
+saves( [ 6503 ] );
+respond( 1, function () { return err( 500, [ 'error' => 'catalogue_write_failed' ] ); } );
+respond( 1, function () { return err( 401, [ 'error' => 'invalid connection secret' ] ); } );   // the ping itself is refused
+run_job();
+ok( '401: no try counted, the row is back', '0' === ( row_of( 6503 )['attempts'] ?? null ) && null === row_of( 6503 )['token'] );
+ok( '401: goes through note_failure — not_connected is recorded', true === ( CashFlow_Catalog::stats()['not_connected'] ?? null ) );
+ok( '401: never called an outage', ! str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'outage' ) );
+
+store();
+saves( [ 6504 ] );
+respond( 1, function () { return err( 500, [ 'error' => 'catalogue_write_failed' ] ); } );
+respond( 1, function () { return err( 403, [ 'error' => 'site_mismatch', 'reason' => 'host_differs' ] ); } );
+run_job();
+ok( '403 site_mismatch: no try counted, the row is back', '0' === ( row_of( 6504 )['attempts'] ?? null ) && null === row_of( 6504 )['token'] );
+$ref504 = CashFlow_Catalog::stats()['site_refusal'] ?? null;
+ok( '403 site_mismatch: goes through note_failure — site_refusal is recorded with the reason', ( $ref504['reason'] ?? '' ) === 'host_differs' );
+ok( '403 site_mismatch: never called an outage', ! str_contains( (string) CashFlow_Catalog::stats()['last_error'], 'outage' ) );
+
+echo "── review-5: a successful corroborating ping clears a stale refusal and honours list_wanted, like a real send\n";
+store();
+CF_TestState::$options['cashflow_catalog_stats'] = [ 'not_connected' => true,
+    'site_refusal' => [ 'reason' => 'host_differs', 'at' => 'x', 'site' => [] ] ];
+saves( [ 6505 ] );
+respond( 1, function () { return err( 500, [ 'error' => 'catalogue_write_failed' ] ); } );
+respond( 1, function () { return [ 'ok' => true, 'status' => 200,
+    'data' => [ 'applied' => [], 'trashed' => [], 'unchanged' => [], 'list_wanted' => true ] ]; } );
+run_job();
+ok( 'the successful ping still counted the product\'s own try', '1' === ( row_of( 6505 )['attempts'] ?? null ) );
+ok( 'and cleared the stale refusal, exactly as a real send would', false === ( CashFlow_Catalog::stats()['not_connected'] ?? null )
+    && null === ( CashFlow_Catalog::stats()['site_refusal'] ?? null ) );
+ok( 'and honoured list_wanted from the ping\'s own body', true === ( CashFlow_Catalog::list_state()['wanted'] ?? false ) );
+
 echo "── minor: add_to_solo() returns what is actually listed, after capping at MAX_PRODUCTS — never the uncapped merge\n";
 store();
 $ref_add = new ReflectionMethod( 'CashFlow_Catalog', 'add_to_solo' );

@@ -57,7 +57,7 @@ class CF_Test_CatalogDB {
     const CLAIM_LISTED_PREFIX  = 'UPDATE wp_cashflow_catalog_queue SET attempts = attempts + IF(token IS NULL, 0, 1), token = %s, claimed_at = %s, pending_key = NULL WHERE parked_at IS NULL AND (token IS NULL OR claimed_at < %s) AND (retry_at IS NULL OR retry_at <= %s) AND product_id IN (';
     const CLAIM_LISTED_SUFFIX  = ') ORDER BY id ASC LIMIT %d';
     const EXISTS_LISTED_PREFIX = 'SELECT DISTINCT product_id FROM wp_cashflow_catalog_queue WHERE product_id IN (';
-    const EXISTS_LISTED_SUFFIX = ')';
+    const EXISTS_LISTED_SUFFIX = ') AND parked_at IS NULL';
 
     /** The ids literally embedded between a listed statement's fixed prefix and suffix. */
     private static function listed_ids( string $sql, string $prefix, string $suffix ): array {
@@ -202,7 +202,7 @@ class CF_Test_CatalogDB {
             case 'exists_listed':
                 $ids = self::listed_ids( $sql, self::EXISTS_LISTED_PREFIX, self::EXISTS_LISTED_SUFFIX );
                 $present = array_unique( array_map( function ( $r ) { return (int) $r['product_id']; },
-                    array_filter( $q, function ( $r ) use ( $ids ) { return in_array( (int) $r['product_id'], $ids, true ); } ) ) );
+                    array_filter( $q, function ( $r ) use ( $ids ) { return in_array( (int) $r['product_id'], $ids, true ) && null === $r['parked_at']; } ) ) );
                 sort( $present );
                 return array_map( 'strval', array_values( $present ) );
         }

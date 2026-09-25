@@ -249,7 +249,9 @@ class CashFlow_Catalog {
         global $wpdb;
         $attempts = (int) $row['attempts'] + 1;
         if ( $attempts >= self::MAX_ATTEMPTS ) {
-            return self::park_row( $row, $token, $attempts ) ? 'parked' : 'error';
+            $parked = self::park_row( $row, $token, $attempts );
+            if ( null === $parked ) { return 'superseded'; }   // another run holds it now
+            return $parked ? 'parked' : 'error';
         }
         $n = $wpdb->query( $wpdb->prepare( self::sql( 'release_failed' ),
             [ self::db_time( self::RETRY_SECONDS ), (int) $row['id'], $token ] ) );
@@ -267,7 +269,11 @@ class CashFlow_Catalog {
         return 'released';
     }
 
-    /** true only when the row was actually parked — fail_row's only way to know. */
+    /**
+     * true when the row was parked; false on a database failure (recorded);
+     * null when no row matched — the lease ran out and another run took the
+     * row back, so it is not this run's to park.
+     */
     public static function park_row( array $row, $token, $attempts ) {
         global $wpdb;
         $n = $wpdb->query( $wpdb->prepare( self::sql( 'park' ), [ (int) $attempts, self::db_time(), (int) $row['id'], $token ] ) );
@@ -275,7 +281,7 @@ class CashFlow_Catalog {
             self::note_error( 'The catalogue queue could not be updated: ' . $wpdb->last_error );
             return false;
         }
-        return $n > 0;
+        return $n > 0 ? true : null;
     }
 
     /** A product sent successfully is no longer a parked problem. */

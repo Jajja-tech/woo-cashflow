@@ -99,6 +99,23 @@ ok( 'and it is recorded', str_contains( (string) ( CashFlow_Catalog::stats()['la
 CF_TestState::$db_error_on = null;
 ok( 'the row is not actually parked', CashFlow_Catalog::count_parked() === 0 );
 
+echo "── a stale run's last failure is superseded, not an error (the row is another run's now)\n";
+CF_TestState::$catalog_queue = [];
+CF_TestState::$options = [];
+CashFlow_Catalog::enqueue( 45, 'save' );
+for ( $try = 1; $try <= 4; $try++ ) {
+    $r = CashFlow_Catalog::claim( "st$try", 25, false );
+    CashFlow_Catalog::fail_row( $r[0], "st$try" );
+    $clock += 61;
+}
+$stale = CashFlow_Catalog::claim( 'stA', 25, false );
+$clock += 301;                                                // stA's lease runs out
+$taken = CashFlow_Catalog::claim( 'stB', 25, false );         // another run takes the row back
+ok( 'the row was taken back by the other run', count( (array) $taken ) === 1 );
+ok( "the stale run's 5th failure is superseded, not error", CashFlow_Catalog::fail_row( $stale[0], 'stA' ) === 'superseded' );
+ok( 'nothing is recorded as a database failure', empty( CashFlow_Catalog::stats()['last_error'] ) );
+ok( 'the other run still holds the row, unparked', CashFlow_Catalog::count_parked() === 0 );
+
 echo "── release_row does not ignore a database failure, and never loses the row\n";
 CF_TestState::$catalog_queue = [];
 CF_TestState::$options = [];

@@ -471,15 +471,15 @@ class CashFlow_Catalog {
             'sku'                   => self::cap( $product->get_sku( 'edit' ), self::CAP_SKU ),
             'type'                  => self::cap( $product->get_type(), self::CAP_TYPE ),
             'status'                => self::cap( $product->get_status( 'edit' ), self::CAP_STATUS ),
-            'regular_price'         => self::cap( $product->get_regular_price( 'edit' ), self::CAP_NUMBER ),
-            'sale_price'            => self::cap( $product->get_sale_price( 'edit' ), self::CAP_NUMBER ),
-            'price'                 => self::cap( $product->get_price( 'edit' ), self::CAP_NUMBER ),
+            'regular_price'         => self::number_or_empty( $product->get_regular_price( 'edit' ) ),
+            'sale_price'            => self::number_or_empty( $product->get_sale_price( 'edit' ) ),
+            'price'                 => self::number_or_empty( $product->get_price( 'edit' ) ),
             'date_on_sale_from_gmt' => self::gmt( $product->get_date_on_sale_from( 'edit' ) ),
             'date_on_sale_to_gmt'   => self::gmt( $product->get_date_on_sale_to( 'edit' ) ),
             'stock_quantity'        => is_numeric( $stock ) ? 0 + $stock : null,
             'stock_status'          => self::cap( $product->get_stock_status( 'edit' ), self::CAP_STOCK_STATUS ),
             'manage_stock'          => (bool) $product->get_manage_stock( 'edit' ),
-            'weight'                => self::cap( $product->get_weight( 'edit' ), self::CAP_NUMBER ),
+            'weight'                => self::number_or_empty( $product->get_weight( 'edit' ) ),
             'categories'            => self::terms( $product->get_category_ids( 'edit' ), 'product_cat' ),
             'tags'                  => self::terms( $product->get_tag_ids( 'edit' ), 'product_tag' ),
             'images'                => $images,
@@ -565,6 +565,15 @@ class CashFlow_Catalog {
     }
 
     /** A string of at most $max characters, valid UTF-8, no U+0000. */
+    /**
+     * A price or weight string over CAP_NUMBER is sent empty, never cut: a cut
+     * number is a different number, and the server reads a bad one as empty.
+     */
+    private static function number_or_empty( $value ) {
+        $v = self::clean( is_scalar( $value ) ? (string) $value : '' );
+        return mb_strlen( $v, 'UTF-8' ) > self::CAP_NUMBER ? '' : $v;
+    }
+
     private static function cap( $value, $max ) {
         $s = self::clean( is_scalar( $value ) ? (string) $value : '' );
         return mb_strlen( $s, 'UTF-8' ) > $max ? mb_substr( $s, 0, $max, 'UTF-8' ) : $s;

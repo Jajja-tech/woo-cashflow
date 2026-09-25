@@ -118,11 +118,12 @@ $big = CashFlow_Catalog::payload( scarf( [
 ] ) )['fields'];
 ok( 'name cut to 500 characters (not bytes)', mb_strlen( $big['name'] ) === 500 );
 ok( 'sku cut to 100', strlen( $big['sku'] ) === 100 );
-ok( 'a number string cut to 40', strlen( $big['regular_price'] ) === 40 );
 ok( 'at most 100 categories, each name cut to 200', count( $big['categories'] ) === 100 && mb_strlen( $big['categories'][0]['name'] ) === 200 );
 ok( 'at most 1,000 variations', count( $big['variations'] ) === 1000 );
-ok( 'a price over the cap is CUT to 40 characters, never sent empty [review, Minor]',
-    strlen( $big['regular_price'] ) === 40 && $big['regular_price'] !== '' );
+// A cut number is a different number ("0000…" reads as 0). The server never
+// cuts a number, it reads a bad one as empty — so an over-long number is sent
+// empty, the way an over-long image URL is dropped (review of Task 7).
+ok( 'a price over the cap is sent empty, never cut', $big['regular_price'] === '' );
 
 echo "── bad bytes never reach the wire [NB7]\n";
 shop();

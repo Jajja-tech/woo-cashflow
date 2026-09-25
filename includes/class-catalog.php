@@ -39,6 +39,11 @@ class CashFlow_Catalog {
     const BUDGET_SECONDS    = 25;   // one run
     const MIN_LEFT_TO_START = 12;   // no request starts with less left (> the timeout, so it always ends in budget)
 
+    const EP_PRODUCTS    = '/plugin/catalog/products';
+    const MAX_PRODUCTS   = 25;      // rows per claim, so products AND removals per body stay within the server's 25 / 100
+    const MAX_BODY_BYTES = 81920;   // 80 KB, measured on the encoded body; the server's JSON parser takes 100 kB
+    const LIST_OPTION    = 'cashflow_catalog_list';
+
     /** Every statement sql() can build. The test harness matches on these. */
     const SQL_NAMES = [
         'show_table', 'insert', 'insert_set', 'claim_real', 'claim_any', 'select_claimed', 'done',
@@ -711,5 +716,207 @@ class CashFlow_Catalog {
     }
 
     private function work( $secret ) {
+        // Real saves first [review-2], until none is due or the run must stop.
+        while ( true ) {
+            $d = $this->drain( $secret, true );
+            if ( 'stop' === $d ) {
+                return;
+            }
+            if ( 'empty' === $d ) {
+                break;
+            }
+        }
+        // Then everything else.
+        while ( 'sent' === $this->drain( $secret, false ) ) {
+        }
+    }
+
+    /** Claim a batch, build it, send it: 'sent' (a batch was handled), 'empty', or 'stop' (end this run). */
+    private function drain( $secret, $real_only ) {
+        if ( ! $this->can_start() ) {
+            return 'stop';
+        }
+        $token = bin2hex( random_bytes( 16 ) );
+        $rows  = self::claim( $token, self::MAX_PRODUCTS, $real_only );
+        if ( null === $rows ) {
+            return 'stop';   // the queue could not be read; noted by claim()
+        }
+        if ( ! $rows ) {
+            return 'empty';
+        }
+        $live = [];
+        foreach ( $rows as $row ) {
+            if ( (int) $row['attempts'] >= self::MAX_ATTEMPTS ) {
+                // Taken back from runs that died MAX_ATTEMPTS times — most likely a
+                // PHP fatal while reading this product. Park it; do not die again.
+                self::park_row( $row, $token, (int) $row['attempts'] );
+            } else {
+                $live[] = $row;
+            }
+        }
+        $entries = $this->entries_for( $live, $token );
+        if ( ! $entries ) {
+            return 'sent';
+        }
+        list( $fit, $rest ) = self::pack( $entries );
+        self::release_entries( $rest, $token );          // did not fit: the next claim takes them, no try counted
+        return 'stop' === $this->send_split( $secret, $fit, $token ) ? 'stop' : 'sent';
+    }
+
+    /** One entry per product id: the product as it is NOW, or a removal if it is gone. */
+    private function entries_for( array $rows, $token ) {
+        $by = [];
+        foreach ( $rows as $row ) {
+            $by[ (int) $row['product_id'] ][] = $row;
+        }
+        $entries = [];
+        foreach ( $by as $id => $group ) {
+            try {
+                $seq     = self::next_seq();             // taken when the product is READ, before it is [NB5]
+                $product = wc_get_product( $id );
+                if ( ! $product ) {
+                    $entries[] = [ 'kind' => 'removed', 'id' => $id, 'rows' => $group, 'body' => [ 'id' => $id, 'sent_seq' => $seq ] ];
+                    continue;
+                }
+                // A product that exists is sent as itself, whatever its rows said
+                // (a delete that did not complete leaves a live product).
+                $status = (string) $product->get_status( 'edit' );
+                if ( 'trash' !== $status && ! in_array( $status, self::SET_STATUSES, true ) ) {
+                    foreach ( $group as $row ) {
+                        self::done_row( $row, $token );   // auto-draft and the like: outside the set [B7]
+                    }
+                    continue;
+                }
+                $built     = self::payload( $product );
+                $entries[] = [ 'kind' => 'product', 'id' => $id, 'rows' => $group,
+                    'body' => $built['fields'] + [ 'fingerprint' => $built['fingerprint'], 'sent_seq' => $seq ] ];
+            } catch ( Throwable $e ) {
+                // Every row for this product fails/parks together [see task-9
+                // deviations #4]. fail_row can itself hit a database failure
+                // ('error') and has already recorded it via note_error — a
+                // second, more generic note_error below would silently
+                // overwrite that real failure with this read failure's
+                // wording, and neither outcome is "parked" unless fail_row
+                // actually says so.
+                $db_failed = false;
+                foreach ( $group as $row ) {
+                    if ( 'error' === self::fail_row( $row, $token ) ) {
+                        $db_failed = true;
+                    }
+                }
+                if ( ! $db_failed ) {
+                    self::note_error( 'Product ' . $id . ' could not be read: ' . $e->getMessage() );
+                }
+            }
+        }
+        self::flush_cache();
+        return $entries;
+    }
+
+    /** As many entries as fit in MAX_BODY_BYTES (always at least one — one product is fitted under MAX_ONE_BYTES). */
+    private static function pack( array $entries ) {
+        $rest = [];
+        while ( count( $entries ) > 1 && strlen( self::encode( self::products_body( $entries ) ) ) > self::MAX_BODY_BYTES ) {
+            array_unshift( $rest, array_pop( $entries ) );
+        }
+        return [ $entries, $rest ];
+    }
+
+    private static function products_body( array $entries ) {
+        $products = [];
+        $removed  = [];
+        foreach ( $entries as $e ) {
+            if ( 'product' === $e['kind'] ) {
+                $products[] = $e['body'];
+            } else {
+                $removed[] = $e['body'];
+            }
+        }
+        $body = [ 'site' => self::site() ];
+        if ( $products ) {
+            $body['products'] = $products;
+        }
+        if ( $removed ) {
+            $body['removed'] = $removed;
+        }
+        return $body;
+    }
+
+    /** Both raw options: the server's host check may match either. [NB6] */
+    public static function site() {
+        return [ 'siteurl' => (string) get_option( 'siteurl', '' ), 'home' => (string) get_option( 'home', '' ) ];
+    }
+
+    /** The body is encoded HERE, with JSON_FLAGS, so the bytes sent are the bytes measured. */
+    private function post( $secret, $endpoint, array $body ) {
+        return CashFlow_Plugin::api_request( $endpoint, 'POST', self::encode( $body ), $secret, self::REQUEST_TIMEOUT );
+    }
+
+    private function send_split( $secret, array $entries, $token ) {
+        if ( ! $this->can_start() ) {
+            self::release_entries( $entries, $token );
+            return 'stop';
+        }
+        $res = $this->post( $secret, self::EP_PRODUCTS, self::products_body( $entries ) );
+        if ( ! empty( $res['ok'] ) ) {
+            $this->on_products_ok( $entries, $token, $res['data'] );
+            return 'ok';
+        }
+        self::release_entries( $entries, $token );
+        self::note_failure( 'Sending products', $res );
+        return 'stop';
+    }
+
+    /** On 200: delete exactly the rows read (by id and token); the product is no longer a parked problem. */
+    private function on_products_ok( array $entries, $token, $data ) {
+        $d = is_array( $data ) ? $data : [];
+        foreach ( $entries as $e ) {
+            foreach ( $e['rows'] as $row ) {
+                self::done_row( $row, $token );
+            }
+            self::clear_parked( $e['id'] );
+        }
+        $s = self::stats();
+        self::update_stats( [
+            'last_send_at'  => self::now_iso(),
+            'sent_count'    => (int) ( $s['sent_count'] ?? 0 ) + count( $entries ),
+            'last_warnings' => is_array( $d['warnings'] ?? null ) ? count( $d['warnings'] ) : 0,
+        ] );
+        if ( ! empty( $d['list_wanted'] ) ) {
+            $st = self::list_state();
+            if ( empty( $st['list_id'] ) ) {
+                $st['wanted'] = true;
+                self::save_list_state( $st );
+            }
+        }
+    }
+
+    private static function release_entries( array $entries, $token ) {
+        foreach ( $entries as $e ) {
+            foreach ( $e['rows'] as $row ) {
+                self::release_row( $row, $token );
+            }
+        }
+    }
+
+    private static function note_failure( $what, array $res ) {
+        $why = class_exists( 'CashFlow_Sync_Pull' ) ? CashFlow_Sync_Pull::describe_failure( $res ) : 'HTTP ' . (int) ( $res['status'] ?? 0 );
+        self::note_error( $what . ' failed: ' . $why );
+    }
+
+    /** Only the in-request cache: a persistent object cache is never flushed. [NB2] */
+    private static function flush_cache() {
+        if ( function_exists( 'wp_cache_flush_runtime' ) ) {
+            wp_cache_flush_runtime();
+        }
+    }
+
+    public static function list_state() {
+        $s = get_option( self::LIST_OPTION, [] );
+        return is_array( $s ) ? $s : [];
+    }
+
+    private static function save_list_state( array $st ) {
+        update_option( self::LIST_OPTION, $st, false );
     }
 }

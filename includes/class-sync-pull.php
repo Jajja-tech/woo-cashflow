@@ -579,7 +579,7 @@ class CashFlow_Sync_Pull {
     // ── Failure wording ─────────────────────────────────────────────
 
     /** One line naming why an api_request failed (status + backend message). */
-    private static function describe_failure( $res ) {
+    public static function describe_failure( $res ) {
         if ( ! empty( $res['data']['error'] ) && is_string( $res['data']['error'] ) ) {
             $status = isset( $res['status'] ) ? (int) $res['status'] : 0;
             return 'HTTP ' . $status . ': ' . $res['data']['error'];

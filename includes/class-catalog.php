@@ -849,8 +849,19 @@ class CashFlow_Catalog {
         return [ 'siteurl' => (string) get_option( 'siteurl', '' ), 'home' => (string) get_option( 'home', '' ) ];
     }
 
-    /** $body is already-encoded JSON (from pack()): never re-encoded, so the bytes sent are the bytes measured. */
+    /**
+     * $body is already-encoded JSON (from pack() or products_body(), re-encoded
+     * the same way when a batch is split): never re-encoded here, so the bytes
+     * sent are the bytes measured. Anything that is not a string is a
+     * programming error, never a wire failure — refuse it rather than let
+     * CashFlow_Plugin::api_request() fall back to wp_json_encode(), which would
+     * send different bytes than were measured against MAX_BODY_BYTES.
+     */
     private function post( $secret, $endpoint, $body ) {
+        if ( ! is_string( $body ) ) {
+            self::note_error( 'Sending to CashFlow was refused: the request body was not a pre-encoded string' );
+            return [ 'ok' => false, 'status' => 0, 'error' => 'body not pre-encoded', 'data' => null ];
+        }
         return CashFlow_Plugin::api_request( $endpoint, 'POST', $body, $secret, self::REQUEST_TIMEOUT );
     }
 
@@ -874,27 +885,85 @@ class CashFlow_Catalog {
         return true;
     }
 
+    /**
+     * What an answer means for the rows in the body — the wire's refusal table
+     * [wire-contract.md, "Refusals common to all three routes"]:
+     *   'ok'    A 2xx carrying the contract's shape (has_shape()). A 2xx that
+     *           does NOT carry it is never "nothing was written" — it is
+     *           treated the same as a stop: released untried, never deleted
+     *           on an assumption.
+     *   'split' 400, 413, 500: something in THIS body was refused or broke the
+     *           write. Split it; a single product that still fails counts a try.
+     *   'stop'  401, 403, 404, 409, 429, 502–504, a transport failure, anything
+     *           else (including a 2xx with the wrong shape): not the rows'
+     *           fault. End the run, count no try.
+     */
+    public static function classify( array $res ) {
+        $code = (int) ( $res['status'] ?? 0 );
+        if ( ! empty( $res['ok'] ) && $code >= 200 && $code < 300 ) {
+            return self::has_shape( $res['data'] ?? null, [ 'applied', 'trashed', 'unchanged' ] ) ? 'ok' : 'stop';
+        }
+        if ( in_array( $code, [ 400, 413, 500 ], true ) ) {
+            return 'split';
+        }
+        return 'stop';
+    }
+
+    /**
+     * Send; on a refusal of the BODY (400/413/500), split it and send each
+     * half; a SINGLE product that still fails counts a try (parked on the
+     * MAX_ATTEMPTS-th). A stop ends the run with no try counted against
+     * anyone. [NB7] $body is the ENCODED string pack() measured for $entries;
+     * a split re-encodes each half the same way (products_body() + encode()),
+     * so the bytes sent always match the entries they were measured from.
+     */
     private function send_split( $secret, array $entries, $token, $body ) {
         if ( ! $this->can_start() ) {
             self::release_entries( $entries, $token );
             return 'stop';
         }
-        $res = $this->post( $secret, self::EP_PRODUCTS, $body );
-        if ( ! empty( $res['ok'] ) && self::has_shape( $res['data'] ?? null, [ 'applied', 'trashed', 'unchanged' ] ) ) {
+        $res   = $this->post( $secret, self::EP_PRODUCTS, $body );
+        $class = self::classify( $res );
+        if ( 'ok' === $class ) {
             $this->on_products_ok( $entries, $token, $res['data'] );
             return 'ok';
         }
-        self::release_entries( $entries, $token );
-        if ( ! empty( $res['ok'] ) ) {
-            // The server answered success, but not with the body it promises —
-            // never treat that as "nothing was written". The rows are kept
-            // (released untried, above), not deleted on an assumption.
-            self::note_error( 'Sending products failed: CashFlow answered HTTP '
-                . (int) ( $res['status'] ?? 0 ) . ' without the expected body' );
-        } else {
-            self::note_failure( 'Sending products', $res );
+        if ( 'stop' === $class ) {
+            self::release_entries( $entries, $token );
+            if ( ! empty( $res['ok'] ) ) {
+                // A 2xx, but not with the body the contract promises — never
+                // treat that as "nothing was written". The rows are kept
+                // (released untried, above), not deleted on an assumption.
+                self::note_error( 'Sending products failed: CashFlow answered HTTP '
+                    . (int) ( $res['status'] ?? 0 ) . ' without the expected body' );
+            } else {
+                self::note_failure( 'Sending products', $res );
+            }
+            return 'stop';
         }
-        return 'stop';
+        // 'split': the body itself was refused, not any one product by name.
+        if ( 1 === count( $entries ) ) {
+            $outcome = '';
+            foreach ( $entries[0]['rows'] as $row ) {
+                $outcome = self::fail_row( $row, $token );
+            }
+            if ( 'error' !== $outcome ) {
+                // 'error' means fail_row's own database write failed and
+                // already recorded THAT failure; a live database failure
+                // outranks a send failure and must stay the panel's last word.
+                self::note_failure( 'Sending product ' . $entries[0]['id']
+                    . ( 'parked' === $outcome ? ' (parked after ' . self::MAX_ATTEMPTS . ' tries)' : '' ), $res );
+            }
+            return 'failed';
+        }
+        $half   = (int) ceil( count( $entries ) / 2 );
+        $first  = array_slice( $entries, 0, $half );
+        $second = array_slice( $entries, $half );
+        if ( 'stop' === $this->send_split( $secret, $first, $token, self::encode( self::products_body( $first ) ) ) ) {
+            self::release_entries( $second, $token );
+            return 'stop';
+        }
+        return $this->send_split( $secret, $second, $token, self::encode( self::products_body( $second ) ) );
     }
 
     /** On 200: delete exactly the rows read (by id and token); the product is no longer a parked problem. */
@@ -912,6 +981,7 @@ class CashFlow_Catalog {
             'sent_count'    => (int) ( $s['sent_count'] ?? 0 ) + count( $entries ),
             'last_warnings' => is_array( $d['warnings'] ?? null ) ? count( $d['warnings'] ) : 0,
         ] );
+        self::clear_refusal();
         if ( ! empty( $d['list_wanted'] ) ) {
             $st = self::list_state();
             if ( empty( $st['list_id'] ) ) {
@@ -929,8 +999,39 @@ class CashFlow_Catalog {
         }
     }
 
+    /**
+     * Records what the wire's own status means for the CONNECTION [NB7]:
+     * 401 → not connected (the panel's own "not connected" surface); 403
+     * site_mismatch → the site's side of the refusal the server also recorded
+     * for the store page; 404 → CashFlow has no catalogue route to answer at
+     * all. The message itself still goes through describe_connection_refusal()
+     * — the one place the wire's exact wording lives — so this never becomes
+     * a second copy of that text.
+     */
     private static function note_failure( $what, array $res ) {
+        $code = (int) ( $res['status'] ?? 0 );
+        $data = is_array( $res['data'] ?? null ) ? $res['data'] : [];
+        $err  = (string) ( $data['error'] ?? '' );
+        if ( 401 === $code ) {
+            self::update_stats( [ 'not_connected' => true ] );
+        } elseif ( 403 === $code && 'site_mismatch' === $err ) {
+            self::update_stats( [ 'site_refusal' => [
+                'reason' => (string) ( $data['reason'] ?? '' ),
+                'at'     => self::now_iso(),
+                'site'   => self::site(),
+            ] ] );
+        } elseif ( 404 === $code ) {
+            $what .= ' (CashFlow does not accept the catalogue yet)';
+        }
         self::note_error( $what . ' failed: ' . self::describe_connection_refusal( $res ) );
+    }
+
+    /** Any 2xx from a catalogue route proves the connection and the site check pass. */
+    private static function clear_refusal() {
+        $s = self::stats();
+        if ( ! empty( $s['site_refusal'] ) || ! empty( $s['not_connected'] ) ) {
+            self::update_stats( [ 'site_refusal' => null, 'not_connected' => false ] );
+        }
     }
 
     /**
@@ -958,7 +1059,7 @@ class CashFlow_Catalog {
             return 'CashFlow refused this connection: ' . $reason;
         }
         if ( 403 === $status && 'site_mismatch' === $error && '' !== $reason ) {
-            return 'CashFlow refused this connection: ' . $reason;
+            return 'CashFlow does not recognise this site\'s address (' . $reason . ')';
         }
         return class_exists( 'CashFlow_Sync_Pull' ) ? CashFlow_Sync_Pull::describe_failure( $res ) : 'HTTP ' . $status;
     }

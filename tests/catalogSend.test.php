@@ -184,16 +184,6 @@ ok( 'the parked row is gone once the product went through', CashFlow_Catalog::co
 echo "── a lease takeback can leave two rows for the same product and reason: sent once, done together\n";
 store();
 product( 501 );
-// Row 90: claimed by a run that died (its lease is long expired) — token still
-// set, claimed_at ancient. Row 91: a fresh 'save' queued for the SAME product
-// and reason after the takeback would normally collide on pending_key, so this
-// models the row exactly as the takeback would find it: both present, neither
-// superseding the other, because pending_key is NULL while a row is claimed —
-// only ONE of the two ever holds the NOT-NULL pending_key at a time, and here
-// both are simply due to be claimed in the same batch.
-// Realistic: a row is claimed (token set) exactly when enqueue's INSERT would
-// have left it NULL — pending_key is ONLY non-null while a row WAITS, and the
-// claim SQL itself blanks it (`pending_key = NULL`) the moment it is taken.
 CF_TestState::$catalog_queue[90] = [ 'id' => '90', 'product_id' => '501', 'reason' => 'save', 'token' => 'dead-run-token',
     'attempts' => '1', 'queued_at' => '2026-09-20 00:00:00', 'claimed_at' => '2020-01-01 00:00:00', 'retry_at' => null,
     'parked_at' => null, 'pending_key' => null ];
@@ -207,7 +197,7 @@ $s = sent();
 ok( 'the product went out exactly once, not twice', count( $s ) === 1 && ids_in( $s[0] ?? null ) === [ 501 ] );
 ok( 'both rows are gone — done together, not just one of them', CF_TestState::$catalog_queue === [] );
 
-echo "── the same double row, but the send fails: released together, neither lost nor duplicated\n";
+echo "── the same double row, but the send fails: failed together, neither lost nor duplicated\n";
 store();
 product( 501 );
 CF_TestState::$catalog_queue[90] = [ 'id' => '90', 'product_id' => '501', 'reason' => 'save', 'token' => 'dead-run-token',
@@ -220,20 +210,24 @@ CF_TestState::$catalog_queue_next = 92;
 CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 500, 'error' => 'boom', 'data' => [ 'error' => 'catalogue_write_failed' ] ];
 run_job();
 ok( 'exactly one send was attempted for the one product', count( sent() ) === 1 );
-// Both rows share the same pending_key ('501:save') once released, and MySQL's
-// UNIQUE index on pending_key can hold only one of them — release_row's own
-// fallback (done_row when release_untried affects 0 rows) deletes the loser as
-// redundant, since the survivor already carries the same change forward.
+// A 500 on a single-product body is a try against THAT product [wire-contract.md:
+// "500 … Keep the queue rows, attempts+1, retry next run"], counted via
+// fail_row() on every row in the group — not the untried release a stop uses.
+// Both rows share the same pending_key ('501:save') once fail_row releases
+// them, and MySQL's UNIQUE index on pending_key can hold only one of them —
+// fail_row's own fallback (done_row when release_failed affects 0 rows)
+// deletes the loser as redundant, since the survivor already carries the
+// same change forward.
 ok( 'exactly one row remains for the product — not lost, not left duplicated', count( CF_TestState::$catalog_queue ) === 1 );
-$left = array_values( CF_TestState::$catalog_queue )[0] ?? [ 'token' => 'unset', 'claimed_at' => 'unset', 'pending_key' => null, 'product_id' => null, 'attempts' => null ];
-ok( 'the surviving row is claimable again next run, with no try counted for this failure',
+$left = array_values( CF_TestState::$catalog_queue )[0] ?? [ 'token' => 'unset', 'claimed_at' => 'unset', 'pending_key' => null, 'product_id' => null, 'attempts' => null, 'retry_at' => 'unset' ];
+ok( 'the surviving row counted exactly one try for this failure and waits for the next run',
     null === $left['token'] && null === $left['claimed_at'] && null !== $left['pending_key']
     && '501' === $left['product_id']
-    // '2' is row 90's attempts AFTER the claim bumped it (its token was already
-    // set, so the reclaim itself counted a try) — release_untried touches no
-    // attempts column at all, so a FAILED send must leave it at exactly that,
-    // never one higher for the release and never reset to row 91's untried '0'.
-    && '2' === $left['attempts'] );
+    // '3' is row 90's attempts AFTER the claim bumped it to 2 (its token was
+    // already set, so the reclaim itself counted a try) THEN fail_row's own
+    // release_failed added exactly one more for this failure.
+    && '3' === $left['attempts']
+    && null !== $left['retry_at'] );
 
 echo "── a 2xx with no contract body must never delete rows\n";
 store();
@@ -302,7 +296,7 @@ CashFlow_Catalog::enqueue( 501, 'save' );
 CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 403,
     'data' => [ 'error' => 'site_mismatch', 'reason' => 'host_differs' ] ];
 run_job();
-ok( 'host_differs is shown', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '', 'CashFlow refused this connection: host_differs' ) );
+ok( 'host_differs is shown', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '', 'CashFlow does not recognise this site\'s address (host_differs)' ) );
 ok( 'the row is kept, not deleted', count( CF_TestState::$catalog_queue ) === 1 );
 
 store();
@@ -311,7 +305,7 @@ CashFlow_Catalog::enqueue( 501, 'save' );
 CF_TestState::$api_responses['/plugin/catalog/products'][] = [ 'ok' => false, 'status' => 403,
     'data' => [ 'error' => 'site_mismatch', 'reason' => 'site_missing' ] ];
 run_job();
-ok( 'site_missing is shown', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '', 'CashFlow refused this connection: site_missing' ) );
+ok( 'site_missing is shown', false !== strpos( CashFlow_Catalog::stats()['last_error'] ?? '', 'CashFlow does not recognise this site\'s address (site_missing)' ) );
 ok( 'this row is kept too, not deleted', count( CF_TestState::$catalog_queue ) === 1 );
 
 echo "── a product read throws AND the database fails: both messages logged, the database one is the panel's last word\n";

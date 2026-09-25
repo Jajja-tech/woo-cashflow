@@ -26,6 +26,19 @@ class CashFlow_Catalog {
     const DB_VERSION_OPTION = 'cashflow_catalog_db_version';
     const TABLE             = 'cashflow_catalog_queue';
 
+    // ── Its own job [N1, NB9] ───────────────────────────────────────
+    const TICK_HOOK   = 'cashflow_catalog_tick';
+    const AS_GROUP    = 'cashflow-catalog';
+    // Action Scheduler runs a LOWER number first; the order tick uses the default
+    // 10. So in any runner batch the order poll has run before this job starts,
+    // and a fatal here cannot stop the order poll of that batch.
+    const AS_PRIORITY = 20;
+    const INTERVAL    = 60;
+
+    const REQUEST_TIMEOUT   = 10;   // every catalogue request
+    const BUDGET_SECONDS    = 25;   // one run
+    const MIN_LEFT_TO_START = 12;   // no request starts with less left (> the timeout, so it always ends in budget)
+
     /** Every statement sql() can build. The test harness matches on these. */
     const SQL_NAMES = [
         'show_table', 'insert', 'insert_set', 'claim_real', 'claim_any', 'select_claimed', 'done',
@@ -76,12 +89,18 @@ class CashFlow_Catalog {
     /** Injectable clock: a callable returning seconds as a float. Null means the real clock. */
     public static $clock = null;
 
+    /** When this run must stop starting requests by (seconds, from now()). */
+    private $deadline = 0.0;
+
     public function __construct() {
         // Constructed inside plugins_loaded (CashFlow_Plugin::init). A plugin
         // UPDATE never fires the activation hook, so this is where the table is
         // created: on the first request of each site that runs this version. [NB1]
         self::maybe_upgrade();
         self::register_hooks();
+        // Action Scheduler's as_* functions are registered by init.
+        add_action( 'init', [ $this, 'maybe_schedule' ] );
+        add_action( self::TICK_HOOK, [ $this, 'tick' ] );
     }
 
     public static function now() {
@@ -635,5 +654,62 @@ class CashFlow_Catalog {
             CashFlow_Plugin::log( 'catalog', 'store', 0, 'error', $message );
         }
         self::update_stats( [ 'last_error' => $message, 'last_error_at' => self::now_iso() ] );
+    }
+
+    // ── The job ─────────────────────────────────────────────────────
+
+    public static function is_available() {
+        return function_exists( 'as_schedule_recurring_action' ) && function_exists( 'as_next_scheduled_action' );
+    }
+
+    public static function is_scheduled() {
+        return self::is_available() && (bool) as_next_scheduled_action( self::TICK_HOOK, [], self::AS_GROUP );
+    }
+
+    /**
+     * On every init: if no run is pending, schedule one. This is also the
+     * recovery path — Action Scheduler can mark an action failed after a PHP
+     * fatal, and the next request puts the recurring job back.
+     */
+    public function maybe_schedule() {
+        if ( ! self::is_available() ) {
+            return;   // the status panel says "unavailable"
+        }
+        if ( as_next_scheduled_action( self::TICK_HOOK, [], self::AS_GROUP ) ) {
+            return;
+        }
+        as_schedule_recurring_action( time() + self::INTERVAL, self::INTERVAL, self::TICK_HOOK, [], self::AS_GROUP, true, self::AS_PRIORITY );
+    }
+
+    /** One run. Never throws: the next run is the retry. */
+    public function tick() {
+        try {
+            $this->run();
+        } catch ( Throwable $e ) {
+            self::note_error( 'The catalogue job crashed: ' . $e->getMessage() );
+        }
+    }
+
+    private function run() {
+        $secret = get_option( 'cashflow_connection_secret', '' );
+        if ( empty( $secret ) ) {
+            return;   // not connected: nothing to send, and the panel already says so
+        }
+        if ( ! self::table_exists() && ! self::install() ) {
+            self::update_stats( [ 'table_missing' => true ] );
+            self::note_error( 'The catalogue queue table is missing and could not be created; product changes are not being sent' );
+            return;
+        }
+        $this->deadline = self::now() + self::BUDGET_SECONDS;
+        self::update_stats( [ 'table_missing' => false, 'last_run_at' => self::now_iso() ] );
+        $this->work( $secret );
+    }
+
+    /** No request starts with less than MIN_LEFT_TO_START seconds of this run's budget left. */
+    private function can_start() {
+        return ( $this->deadline - self::now() ) >= self::MIN_LEFT_TO_START;
+    }
+
+    private function work( $secret ) {
     }
 }

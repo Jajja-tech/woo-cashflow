@@ -162,6 +162,8 @@ class CashFlow_Plugin {
                 // extends a WooCommerce REST controller and is lazy-loaded
                 // by CashFlow_Sync_Pull once that parent is loadable.
                 'includes/class-sync-pull.php',
+                // The catalogue: product changes pushed to CashFlow by its own job.
+                'includes/class-catalog.php',
             ];
             foreach ( $files as $file ) {
                 $path = CASHFLOW_PLUGIN_DIR . $file;
@@ -183,6 +185,7 @@ class CashFlow_Plugin {
                 'CashFlow_Advance',
                 'CashFlow_REST',
                 'CashFlow_Sync_Pull',
+                'CashFlow_Catalog',
             ];
             foreach ( $modules as $class ) {
                 if ( class_exists( $class ) ) {
@@ -239,6 +242,11 @@ class CashFlow_Plugin {
         // deactivation time, there is nothing to unschedule anyway.
         if ( function_exists( 'as_unschedule_all_actions' ) ) {
             as_unschedule_all_actions( 'cashflow_sync_pull_tick' );
+            // The catalogue job, in its own group. Its class is required here
+            // because deactivation can run in a request whose plugins_loaded
+            // never booted the modules.
+            require_once CASHFLOW_PLUGIN_DIR . 'includes/class-catalog.php';
+            as_unschedule_all_actions( CashFlow_Catalog::TICK_HOOK, [], CashFlow_Catalog::AS_GROUP );
         }
     }
 

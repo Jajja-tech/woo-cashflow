@@ -28,10 +28,9 @@ if ( ! function_exists( 'untrailingslashit' ) ) {
     function untrailingslashit( $s ) { return rtrim( (string) $s, '/\\' ); }
 }
 
-$src = (string) file_get_contents( __DIR__ . '/../woo-cashflow.php' );
-$at  = strpos( $src, "\nclass CashFlow_Plugin {" );
-ok( 'the real CashFlow_Plugin class is found in woo-cashflow.php', false !== $at );
-eval( str_replace( "\nclass CashFlow_Plugin {", "\nclass CF_Real_Plugin {", substr( $src, (int) $at ) ) );
+require_once __DIR__ . '/support/realPlugin.php';
+cf_load_real_plugin();
+ok( 'the real CashFlow_Plugin class is found in woo-cashflow.php', class_exists( 'CF_Real_Plugin', false ) );
 
 echo "── an array body is encoded, and the default timeout is unchanged\n";
 CF_Real_Plugin::api_request( '/plugin/sync/poll', 'POST', [ 'a' => 1 ], 'secret-xyz' );

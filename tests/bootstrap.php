@@ -95,12 +95,17 @@ class WP_Error {
  */
 if ( ! class_exists( 'CashFlow_Plugin' ) ) {
     class CashFlow_Plugin {
-        public static function api_request( $endpoint, $method = 'GET', $body = null, $token = null ) {
-            CF_TestState::$api_calls[] = [ 'endpoint' => $endpoint, 'method' => $method, 'body' => $body, 'token' => $token ];
+        public static function api_request( $endpoint, $method = 'GET', $body = null, $token = null, $timeout = 30 ) {
+            $call = [ 'endpoint' => $endpoint, 'method' => $method, 'body' => $body, 'token' => $token, 'timeout' => $timeout ];
+            CF_TestState::$api_calls[] = $call;
             if ( empty( CF_TestState::$api_responses[ $endpoint ] ) ) {
                 return [ 'ok' => false, 'status' => 0, 'error' => "harness: no scripted response for $endpoint", 'data' => null ];
             }
-            return array_shift( CF_TestState::$api_responses[ $endpoint ] );
+            $r = array_shift( CF_TestState::$api_responses[ $endpoint ] );
+            // A scripted response may be a closure. It runs AT the moment of the
+            // request, so a test can make something happen while a send is in
+            // flight — a save during a send is the case the catalogue queue exists for.
+            return $r instanceof Closure ? $r( $call ) : $r;
         }
         public static function log( $event_type, $object_type, $object_id, $status = 'success', $message = '' ) {
             CF_TestState::$log[] = compact( 'event_type', 'object_type', 'object_id', 'status', 'message' );

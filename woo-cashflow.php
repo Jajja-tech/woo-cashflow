@@ -295,7 +295,7 @@ class CashFlow_Plugin {
     }
 
     // ── CashFlow API request ────────────────────────────────────────
-    public static function api_request( $endpoint, $method = 'GET', $body = null, $token = null ) {
+    public static function api_request( $endpoint, $method = 'GET', $body = null, $token = null, $timeout = 30 ) {
         if ( ! $token ) {
             return [ 'ok' => false, 'error' => 'missing auth token', 'status' => 0, 'data' => null ];
         }
@@ -308,11 +308,20 @@ class CashFlow_Plugin {
                 'X-CashFlow-Site'     => get_site_url(),
                 'X-Plugin-Version'    => CASHFLOW_VERSION,
             ],
-            'timeout'    => 30,
+            // Never 0: WordPress reads a zero timeout as "wait forever", and a
+            // request that never returns holds the whole Action Scheduler batch.
+            'timeout'    => max( 1, (int) $timeout ),
             'sslverify'  => true,
         ];
 
-        if ( $body ) {
+        if ( is_string( $body ) ) {
+            // Already encoded by the caller. The catalogue measures its body in
+            // BYTES against a cap below the server's JSON limit and encodes it
+            // with JSON_INVALID_UTF8_SUBSTITUTE; re-encoding here would send a
+            // JSON string instead of the object, and different bytes than it
+            // measured.
+            $args['body'] = $body;
+        } elseif ( $body ) {
             $args['body'] = wp_json_encode( $body );
         }
 

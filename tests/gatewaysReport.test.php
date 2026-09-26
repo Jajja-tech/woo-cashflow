@@ -92,7 +92,7 @@ $out = CashFlow_Sync_Pull::enabled_gateways();
 ok( 'cut to exactly 200 characters', mb_strlen( $out[0]['title'] ?? '', 'UTF-8' ) === 200, (string) mb_strlen( $out[0]['title'] ?? '', 'UTF-8' ) );
 ok( 'still valid UTF-8, so the poll body can be encoded', mb_check_encoding( $out[0]['title'] ?? '', 'UTF-8' ) && false !== json_encode( $out ) );
 
-echo "── a gateway whose get_title() throws → the whole call returns null, never throws\n";
+echo "── a gateway whose get_title() throws is still reported, its id standing in for the title (final review M5)\n";
 CF_TestState::$payment_gateways = [
     'cod'  => gw( 'cod', 'yes', 'Cash on Delivery' ),
     'bacs' => gw( 'bacs', 'yes', new RuntimeException( 'a broken gateway plugin' ) ),
@@ -105,7 +105,9 @@ try {
     $threw = true;
 }
 ok( 'enabled_gateways() never throws', false === $threw );
-ok( 'and answers null rather than a partial list', null === $throw_result, json_encode( $throw_result ) );
+ok( 'the WORKING gateway still reports', is_array( $throw_result ) && count( $throw_result ) === 2, json_encode( $throw_result ) );
+ok( 'the broken one reports too, with its id as the title — only a whole-read failure answers null',
+    ( $throw_result[1]['id'] ?? '' ) === 'bacs' && ( $throw_result[1]['title'] ?? '' ) === 'bacs', json_encode( $throw_result ) );
 
 echo "── zero enabled gateways → [], and the key IS sent (a real, positive report)\n";
 connected_store();
@@ -135,5 +137,42 @@ ok( 'the poll body carries the reported gateways', ( $poll['gateways'] ?? null )
 ], json_encode( $poll['gateways'] ?? null ) );
 ok( 'still carries version, limit and supports too', ( $poll['version'] ?? null ) === CASHFLOW_VERSION
     && ( $poll['limit'] ?? null ) === 3 && ( $poll['supports'] ?? null ) === [ 'order.create@1', 'catalog.push@1' ] );
+
+echo "── an id over 100 characters is dropped (final review M6)\n";
+$id100 = str_repeat( 'x', 100 );
+CF_TestState::$payment_gateways = [ $id100 => gw( $id100, 'yes', 'Title' ) ];
+$out = CashFlow_Sync_Pull::enabled_gateways();
+ok( 'an id at exactly 100 chars is kept', is_array( $out ) && count( $out ) === 1 && ( $out[0]['id'] ?? '' ) === $id100, json_encode( $out ) );
+
+$long_id = str_repeat( 'x', 101 );
+CF_TestState::$payment_gateways = [ $long_id => gw( $long_id, 'yes', 'Title' ) ];
+$out = CashFlow_Sync_Pull::enabled_gateways();
+ok( 'an id over 100 chars is dropped, not truncated', is_array( $out ) && [] === $out, json_encode( $out ) );
+
+echo "── a duplicate id (numeric array keys, so both fall back to \$g->id) keeps the FIRST (final review M6)\n";
+CF_TestState::$payment_gateways = [
+    gw( 'cod', 'yes', 'First title' ),
+    gw( 'cod', 'yes', 'A later, different title' ),
+];
+$out = CashFlow_Sync_Pull::enabled_gateways();
+ok( 'only one entry survives', is_array( $out ) && count( $out ) === 1, json_encode( $out ) );
+ok( 'it is the FIRST one seen', ( $out[0]['title'] ?? '' ) === 'First title', json_encode( $out ) );
+
+echo "── a plain numeric array key is not usable as an id — falls back to \$g->id (final review M6)\n";
+CF_TestState::$payment_gateways = [ gw( 'bacs', 'yes', 'Direct Bank Transfer' ) ]; // key 0, not 'bacs'
+$out = CashFlow_Sync_Pull::enabled_gateways();
+ok( 'the id comes from $g->id, not the array key', is_array( $out ) && count( $out ) === 1
+    && ( $out[0]['id'] ?? '' ) === 'bacs', json_encode( $out ) );
+
+echo "── control characters are stripped from both id and title before anything is bounded (final review M3/M6)\n";
+CF_TestState::$payment_gateways = [ "co\x00d" => gw( "co\x00d", 'yes', "Cash\x07 on\x7F delivery" ) ];
+$out = CashFlow_Sync_Pull::enabled_gateways();
+ok( 'the id has its control characters stripped', ( $out[0]['id'] ?? '' ) === 'cod', json_encode( $out ) );
+ok( 'the title has its control characters stripped', ( $out[0]['title'] ?? '' ) === 'Cash on delivery', json_encode( $out ) );
+
+echo "── an id that is nothing but control characters is dropped, like an empty one\n";
+CF_TestState::$payment_gateways = [ "\x00\x01" => gw( "\x00\x01", 'yes', 'Title' ) ];
+$out = CashFlow_Sync_Pull::enabled_gateways();
+ok( 'dropped, not reported with a blank id', is_array( $out ) && [] === $out, json_encode( $out ) );
 
 summary();

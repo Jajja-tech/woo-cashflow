@@ -587,16 +587,21 @@ class CashFlow_Sync_Pull {
      * customer country) and returns NOTHING when this runs on a cron tick —
      * it would report every store as having zero payment methods.
      *
-     * Never throws. Any failure — WC not ready, a misbehaving gateway's
-     * get_title() — is caught and answered as null so one bad gateway does
-     * not stop the tick's jobs/commands from being processed. null is also
-     * the "not known this poll" signal the caller uses to omit the key
-     * entirely, distinct from a genuine empty list.
+     * Never throws. A failure reading WC's gateway LIST AT ALL (WC not ready,
+     * WC()->payment_gateways() unreadable) is answered as null — the "not
+     * known this poll" signal the caller uses to omit the key entirely,
+     * distinct from a genuine empty list. A single MISBEHAVING gateway (its
+     * get_title() throws) is caught PER GATEWAY and still reported, with its
+     * id standing in for the title — the plan's own "update the plugin" reply
+     * would otherwise mislead a merchant who already has (final review M5:
+     * one broken gateway must not silence every other one that works).
      *
      * Bounds (matched on the backend, so the two sides can never disagree
      * about what a report means): at most 50 entries, in WooCommerce's own
-     * gateway order; id trimmed, 1–100 chars, duplicate ids keep the first
-     * seen; title trimmed, empty → the id, over 200 chars → cut to 200.
+     * gateway order; control characters (U+0000-U+001F, U+007F) stripped from
+     * both id and title before anything is measured; id trimmed, 1–100 chars,
+     * duplicate ids keep the first seen; title trimmed, empty → the id, over
+     * 200 chars → cut to 200 (in CHARACTERS, never bytes).
      *
      * @return array|null [ [ 'id' => string, 'title' => string ], ... ] or null.
      */
@@ -613,12 +618,16 @@ class CashFlow_Sync_Pull {
             if ( ! is_array( $gateways ) ) {
                 return null;
             }
+        } catch ( Throwable $e ) {
+            return null;
+        }
 
-            $out  = [];
-            $seen = [];
-            foreach ( $gateways as $key => $g ) {
-                if ( count( $out ) >= 50 ) { break; }
-                if ( ! is_object( $g ) ) { continue; }
+        $out  = [];
+        $seen = [];
+        foreach ( $gateways as $key => $g ) {
+            if ( count( $out ) >= 50 ) { break; }
+            if ( ! is_object( $g ) ) { continue; }
+            try {
                 $enabled = isset( $g->enabled ) ? (string) $g->enabled : '';
                 if ( 'yes' !== $enabled ) { continue; }
 
@@ -626,13 +635,21 @@ class CashFlow_Sync_Pull {
                 // id itself); fall back to the object's own ->id when the
                 // key is not usable as one (e.g. a plain numeric list).
                 $id = ( is_string( $key ) && '' !== $key ) ? $key : (string) ( $g->id ?? '' );
-                $id = trim( $id );
+                $id = trim( self::strip_control_chars( $id ) );
                 if ( '' === $id || mb_strlen( $id, 'UTF-8' ) > 100 ) { continue; }
                 if ( isset( $seen[ $id ] ) ) { continue; } // duplicate ids keep the first
                 $seen[ $id ] = true;
 
-                $title = is_callable( [ $g, 'get_title' ] ) ? (string) $g->get_title() : '';
-                $title = trim( $title );
+                // A broken gateway's get_title() must not cost it — or any
+                // gateway after it — its place in the report (final review
+                // M5). It is still reported; its id stands in for the title,
+                // same as an empty one.
+                try {
+                    $title = is_callable( [ $g, 'get_title' ] ) ? (string) $g->get_title() : '';
+                } catch ( Throwable $e ) {
+                    $title = '';
+                }
+                $title = trim( self::strip_control_chars( $title ) );
                 if ( '' === $title ) { $title = $id; }
                 // Counted and cut in characters, never bytes: a byte cut can
                 // split an Urdu character, and one invalid byte sequence makes
@@ -640,11 +657,22 @@ class CashFlow_Sync_Pull {
                 if ( mb_strlen( $title, 'UTF-8' ) > 200 ) { $title = mb_substr( $title, 0, 200, 'UTF-8' ); }
 
                 $out[] = [ 'id' => $id, 'title' => $title ];
+            } catch ( Throwable $e ) {
+                continue; // one broken gateway must not stop the rest reporting
             }
-            return $out;
-        } catch ( Throwable $e ) {
-            return null;
         }
+        return $out;
+    }
+
+    /**
+     * U+0000-U+001F (the C0 controls) and U+007F (DEL), stripped before
+     * anything is measured or stored (final review M3/M6, matched on the
+     * backend). None of these is something a merchant typed into a gateway's
+     * id or title on purpose, and a stray one can make the store JSON the
+     * poll body carries it in unencodable.
+     */
+    private static function strip_control_chars( string $s ): string {
+        return preg_replace( '/[\x00-\x1F\x7F]/', '', $s );
     }
 
     /**

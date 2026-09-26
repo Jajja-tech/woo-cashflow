@@ -627,14 +627,17 @@ class CashFlow_Sync_Pull {
                 // key is not usable as one (e.g. a plain numeric list).
                 $id = ( is_string( $key ) && '' !== $key ) ? $key : (string) ( $g->id ?? '' );
                 $id = trim( $id );
-                if ( '' === $id || strlen( $id ) > 100 ) { continue; }
+                if ( '' === $id || mb_strlen( $id, 'UTF-8' ) > 100 ) { continue; }
                 if ( isset( $seen[ $id ] ) ) { continue; } // duplicate ids keep the first
                 $seen[ $id ] = true;
 
                 $title = is_callable( [ $g, 'get_title' ] ) ? (string) $g->get_title() : '';
                 $title = trim( $title );
                 if ( '' === $title ) { $title = $id; }
-                if ( strlen( $title ) > 200 ) { $title = substr( $title, 0, 200 ); }
+                // Counted and cut in characters, never bytes: a byte cut can
+                // split an Urdu character, and one invalid byte sequence makes
+                // the whole poll body unencodable.
+                if ( mb_strlen( $title, 'UTF-8' ) > 200 ) { $title = mb_substr( $title, 0, 200, 'UTF-8' ); }
 
                 $out[] = [ 'id' => $id, 'title' => $title ];
             }

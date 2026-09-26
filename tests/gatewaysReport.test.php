@@ -85,6 +85,13 @@ $pull->tick();
 $poll = calls_to( '/plugin/sync/poll' )[0]['body'] ?? [];
 ok( 'the poll body carries no gateways key at all', ! array_key_exists( 'gateways', $poll ), json_encode( $poll ) );
 
+echo "── a long Urdu title is cut in characters, never mid-character\n";
+CF_TestState::reset();
+CF_TestState::$payment_gateways = [ 'cod' => gw( 'cod', 'yes', str_repeat( 'نقد', 100 ) ) ];
+$out = CashFlow_Sync_Pull::enabled_gateways();
+ok( 'cut to exactly 200 characters', mb_strlen( $out[0]['title'] ?? '', 'UTF-8' ) === 200, (string) mb_strlen( $out[0]['title'] ?? '', 'UTF-8' ) );
+ok( 'still valid UTF-8, so the poll body can be encoded', mb_check_encoding( $out[0]['title'] ?? '', 'UTF-8' ) && false !== json_encode( $out ) );
+
 echo "── a gateway whose get_title() throws → the whole call returns null, never throws\n";
 CF_TestState::$payment_gateways = [
     'cod'  => gw( 'cod', 'yes', 'Cash on Delivery' ),

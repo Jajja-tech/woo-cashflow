@@ -21,6 +21,6 @@ ok( 'header Version equals CASHFLOW_VERSION', ( $h[1] ?? 'a' ) === ( $c[1] ?? 'b
     'header ' . ( $h[1] ?? '?' ) . ' vs constant ' . ( $c[1] ?? '?' ) );
 ok( 'the harness reports the same version the plugin does', CASHFLOW_VERSION === ( $c[1] ?? '' ),
     'harness ' . CASHFLOW_VERSION );
-ok( 'this release is 6.7.0 (the one that pushes the catalogue)', ( $c[1] ?? '' ) === '6.7.0' );
+ok( 'this release is 6.8.0 (the one that reports its payment methods)', ( $c[1] ?? '' ) === '6.8.0' );
 
 summary();

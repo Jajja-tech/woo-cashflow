@@ -124,11 +124,22 @@ class CashFlow_Sync_Pull {
         // CashFlow_Plugin::api_request(). Never Authorization: Basic — WP
         // core's Application Passwords eats Basic on custom namespaces;
         // irrelevant outbound, but the convention stands app-wide.
-        $res = CashFlow_Plugin::api_request( '/plugin/sync/poll', 'POST', [
+        $poll_body = [
             'version'  => CASHFLOW_VERSION,
             'limit'    => self::POLL_LIMIT,
             'supports' => self::SUPPORTS,
-        ], $secret );
+        ];
+        // ABSENT means "not known this poll" (the backend keeps whatever it
+        // already stored) — so a tick that could not read WC's gateways at
+        // all must never send the key, let alone send it empty. An EMPTY
+        // array is a real, positive report ("this store has no enabled
+        // gateway right now") and is sent.
+        $gateways = self::enabled_gateways();
+        if ( null !== $gateways ) {
+            $poll_body['gateways'] = $gateways;
+        }
+
+        $res = CashFlow_Plugin::api_request( '/plugin/sync/poll', 'POST', $poll_body, $secret );
 
         if ( empty( $res['ok'] ) ) {
             $why = self::describe_failure( $res );
@@ -563,6 +574,74 @@ class CashFlow_Sync_Pull {
             }
         }
         return $out;
+    }
+
+    /**
+     * The store's own enabled payment gateways, reported on every poll so the
+     * order editor can offer exactly these — never a fixed cod/bacs stand-in
+     * (Golden Rule #6: a store that has not been asked says so; nothing here
+     * invents an answer for it).
+     *
+     * DELIBERATELY `enabled`, never get_available_payment_gateways(): the
+     * latter depends on a cart/checkout context (currency, shipping zone,
+     * customer country) and returns NOTHING when this runs on a cron tick —
+     * it would report every store as having zero payment methods.
+     *
+     * Never throws. Any failure — WC not ready, a misbehaving gateway's
+     * get_title() — is caught and answered as null so one bad gateway does
+     * not stop the tick's jobs/commands from being processed. null is also
+     * the "not known this poll" signal the caller uses to omit the key
+     * entirely, distinct from a genuine empty list.
+     *
+     * Bounds (matched on the backend, so the two sides can never disagree
+     * about what a report means): at most 50 entries, in WooCommerce's own
+     * gateway order; id trimmed, 1–100 chars, duplicate ids keep the first
+     * seen; title trimmed, empty → the id, over 200 chars → cut to 200.
+     *
+     * @return array|null [ [ 'id' => string, 'title' => string ], ... ] or null.
+     */
+    public static function enabled_gateways() {
+        try {
+            if ( ! function_exists( 'WC' ) || ! is_callable( [ WC(), 'payment_gateways' ] ) ) {
+                return null;
+            }
+            $pg = WC()->payment_gateways();
+            if ( ! $pg || ! is_callable( [ $pg, 'payment_gateways' ] ) ) {
+                return null;
+            }
+            $gateways = $pg->payment_gateways();
+            if ( ! is_array( $gateways ) ) {
+                return null;
+            }
+
+            $out  = [];
+            $seen = [];
+            foreach ( $gateways as $key => $g ) {
+                if ( count( $out ) >= 50 ) { break; }
+                if ( ! is_object( $g ) ) { continue; }
+                $enabled = isset( $g->enabled ) ? (string) $g->enabled : '';
+                if ( 'yes' !== $enabled ) { continue; }
+
+                // The array key is WC's own indexing (normally the gateway
+                // id itself); fall back to the object's own ->id when the
+                // key is not usable as one (e.g. a plain numeric list).
+                $id = ( is_string( $key ) && '' !== $key ) ? $key : (string) ( $g->id ?? '' );
+                $id = trim( $id );
+                if ( '' === $id || strlen( $id ) > 100 ) { continue; }
+                if ( isset( $seen[ $id ] ) ) { continue; } // duplicate ids keep the first
+                $seen[ $id ] = true;
+
+                $title = is_callable( [ $g, 'get_title' ] ) ? (string) $g->get_title() : '';
+                $title = trim( $title );
+                if ( '' === $title ) { $title = $id; }
+                if ( strlen( $title ) > 200 ) { $title = substr( $title, 0, 200 ); }
+
+                $out[] = [ 'id' => $id, 'title' => $title ];
+            }
+            return $out;
+        } catch ( Throwable $e ) {
+            return null;
+        }
     }
 
     /**

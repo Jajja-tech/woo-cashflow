@@ -68,6 +68,14 @@ class CF_TestState {
     public static array $dbdelta = [];         // every SQL dbDelta was handed
     public static bool  $dbdelta_creates = true;
     public static ?Throwable $dbdelta_throws = null;
+    // WC()->payment_gateways()->payment_gateways() — null means "WC's
+    // payment gateways are not available this call" (mirrors a cron tick
+    // running before WC has finished loading them), matching how
+    // WC_Payment_Gateways can hand back nothing. An array (possibly empty)
+    // is the normal case. Keys are typically the gateway id, exactly as
+    // real WC keys this array, but a stub gateway's OWN ->id is what
+    // enabled_gateways() must fall back to when a key is not a string.
+    public static ?array $payment_gateways = null;
 
     public static function reset(): void {
         self::$orders = [];
@@ -109,6 +117,7 @@ class CF_TestState {
         self::$dbdelta = [];
         self::$dbdelta_creates = true;
         self::$dbdelta_throws = null;
+        self::$payment_gateways = null;
     }
 }
 
@@ -474,6 +483,40 @@ function wc_get_product( $id ) {
     if ( CF_TestState::$on_wc_get_product ) { ( CF_TestState::$on_wc_get_product )( (int) $id ); }
     return CF_TestState::$products[ (int) $id ] ?? false;
 }
+
+/**
+ * A stub WC_Payment_Gateway. `enabled` is a public string property on the
+ * real class ('yes'/'no'), read directly — never through a getter. `get_title`
+ * can be handed a Throwable so a test can prove enabled_gateways() survives a
+ * misbehaving gateway rather than crashing the whole tick.
+ */
+class CF_Test_Gateway {
+    private $title;
+    public function __construct( public string $id, public string $enabled = 'yes', $title = '' ) {
+        $this->title = $title;
+    }
+    public function get_title() {
+        if ( $this->title instanceof Throwable ) { throw $this->title; }
+        return (string) $this->title;
+    }
+}
+/** WC_Payment_Gateways — the object WC()->payment_gateways() returns. */
+class CF_Test_Payment_Gateways {
+    public function __construct( private array $list ) {}
+    public function payment_gateways() { return $this->list; }
+}
+/** WC() itself. Always defined so function_exists('WC') is true, exactly as
+ * on a real store — what varies per test is whether payment_gateways()
+ * can answer, via CF_TestState::$payment_gateways.
+ */
+class CF_Test_WC {
+    public function payment_gateways() {
+        return null === CF_TestState::$payment_gateways
+            ? null
+            : new CF_Test_Payment_Gateways( CF_TestState::$payment_gateways );
+    }
+}
+function WC() { return new CF_Test_WC(); }
 
 /**
  * wc_transaction_query — modelled as a real transaction: 'start' snapshots the

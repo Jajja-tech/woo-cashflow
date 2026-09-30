@@ -3,7 +3,7 @@
  * Plugin Name: Woo Sync For Cashflow.pk
  * Plugin URI:  https://cashflow.pk
  * Description: Secure bi-directional sync — WooCommerce ↔ CashFlow.pk. One-click setup with store ownership verification.
- * Version:     6.9.0
+ * Version:     6.10.0
  * Update URI:  https://github.com/Jajja-tech/woo-cashflow
  * Author:      CashFlow.pk
  * Author URI:  https://cashflow.pk
@@ -17,7 +17,7 @@
 defined( 'ABSPATH' ) || exit;
 
 // ── Constants ──────────────────────────────────────────────────────
-define( 'CASHFLOW_VERSION',    '6.9.0' );
+define( 'CASHFLOW_VERSION',    '6.10.0' );
 define( 'CASHFLOW_PLUGIN_FILE', __FILE__ );
 define( 'CASHFLOW_PLUGIN_DIR',  plugin_dir_path( __FILE__ ) );
 define( 'CASHFLOW_PLUGIN_URL',  plugin_dir_url( __FILE__ ) );
@@ -252,6 +252,7 @@ class CashFlow_Plugin {
             as_unschedule_all_actions( CashFlow_Catalog::TICK_HOOK, [], CashFlow_Catalog::AS_GROUP );
             require_once CASHFLOW_PLUGIN_DIR . 'includes/class-media.php';
             as_unschedule_all_actions( CashFlow_Media::TICK_HOOK, [], CashFlow_Media::AS_GROUP );
+            as_unschedule_all_actions( CashFlow_Media::FOLLOW_HOOK, [], CashFlow_Media::AS_GROUP );
         }
     }
 

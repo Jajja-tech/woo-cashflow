@@ -48,6 +48,7 @@ class CF_TestState {
     public static array $actions = [];        // hook => [ [callback, priority, accepted_args] ] — add_action
     public static array $as_calls = [];       // every as_* call, in order
     public static array $as_scheduled = [];   // hook => [ 'timestamp', 'group', 'priority' ]
+    public static array $as_singles = [];     // one-off actions: id => [ 'hook', 'group', 'timestamp', 'status', 'priority' ]
     public static array $posts = [];          // id => [ 'type', 'status', 'parent' ] — the wp_posts rows that matter
     public static array $terms = [];          // term_id => (object) [ term_id, name, slug, taxonomy, count ]
     public static ?string $terms_error = null; // set: get_terms answers WP_Error, as core does on a DB failure
@@ -97,6 +98,7 @@ class CF_TestState {
         self::$actions = [];
         self::$as_calls = [];
         self::$as_scheduled = [];
+        self::$as_singles = [];
         self::$posts = [];
         self::$terms = [];
         self::$terms_error = null;
@@ -181,13 +183,54 @@ function as_schedule_recurring_action( $timestamp, $interval, $hook, $args = [],
     return count( CF_TestState::$as_calls );
 }
 function as_next_scheduled_action( $hook, $args = null, $group = '' ) {
+    $mine = array_filter( CF_TestState::$as_singles, function ( $a ) use ( $hook, $group ) {
+        return $a['hook'] === $hook && ( '' === $group || $a['group'] === $group );
+    } );
+    foreach ( $mine as $a ) {
+        if ( 'in-progress' === $a['status'] ) { return true; }
+    }
     $s = CF_TestState::$as_scheduled[ $hook ] ?? null;
-    if ( ! $s || ( '' !== $group && $s['group'] !== $group ) ) { return false; }
-    return $s['timestamp'];
+    if ( $s && ( '' === $group || $s['group'] === $group ) ) { return $s['timestamp']; }
+    $pending = array_column( array_filter( $mine, function ( $a ) { return 'pending' === $a['status']; } ), 'timestamp' );
+    return $pending ? min( $pending ) : false;
 }
 function as_unschedule_all_actions( $hook, $args = [], $group = '' ) {
     CF_TestState::$as_calls[] = [ 'fn' => 'unschedule_all', 'hook' => $hook, 'group' => $group ];
     unset( CF_TestState::$as_scheduled[ $hook ] );
+    CF_TestState::$as_singles = array_filter( CF_TestState::$as_singles, function ( $a ) use ( $hook ) { return $a['hook'] !== $hook; } );
+}
+// One-off actions, with the two behaviours of the real library that decide
+// whether a chain of follow-up runs survives (read in its source: functions.php
+// and ActionScheduler_DBStore::build_where_clause_for_insert):
+//   · $unique refuses when a PENDING OR IN-PROGRESS action has the same hook
+//     and group, and answers 0;
+//   · as_next_scheduled_action() answers TRUE for an in-progress action.
+// A run started by a follow-up is in progress while it asks for the next one,
+// so a stub that only knew "pending" could not fail the way a shop would.
+function as_schedule_single_action( $timestamp, $hook, $args = [], $group = '', $unique = false, $priority = 10 ) {
+    CF_TestState::$as_calls[] = [ 'fn' => 'schedule_single', 'hook' => $hook, 'timestamp' => $timestamp,
+        'group' => $group, 'unique' => $unique, 'priority' => $priority ];
+    if ( $unique ) {
+        foreach ( CF_TestState::$as_singles as $a ) {
+            if ( $a['hook'] === $hook && $a['group'] === $group && in_array( $a['status'], [ 'pending', 'in-progress' ], true ) ) {
+                return 0;
+            }
+        }
+    }
+    $id = count( CF_TestState::$as_singles ) + 1;
+    CF_TestState::$as_singles[ $id ] = [ 'hook' => $hook, 'group' => $group, 'timestamp' => $timestamp, 'status' => 'pending', 'priority' => $priority ];
+    return $id;
+}
+function as_get_scheduled_actions( $args = [], $return_format = 'OBJECT' ) {
+    if ( 'ids' !== $return_format ) { throw new LogicException( 'harness: as_get_scheduled_actions is modelled for the ids format only' ); }
+    $ids = [];
+    foreach ( CF_TestState::$as_singles as $id => $a ) {
+        if ( isset( $args['hook'] ) && $a['hook'] !== $args['hook'] ) { continue; }
+        if ( isset( $args['group'] ) && $a['group'] !== $args['group'] ) { continue; }
+        if ( isset( $args['status'] ) && $a['status'] !== $args['status'] ) { continue; }
+        $ids[] = $id;
+    }
+    return array_slice( $ids, 0, (int) ( $args['per_page'] ?? 5 ) );
 }
 
 /**

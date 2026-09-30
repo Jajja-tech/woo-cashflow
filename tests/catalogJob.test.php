@@ -103,5 +103,7 @@ CF_Real_Plugin::deactivate();
 $un = array_values( array_filter( CF_TestState::$as_calls, function ( $c ) { return 'unschedule_all' === $c['fn']; } ) );
 ok( 'deactivate unschedules the order tick (unchanged)', in_array( 'cashflow_sync_pull_tick', array_column( $un, 'hook' ), true ) );
 ok( 'and the catalogue job, in its own group', in_array( [ 'fn' => 'unschedule_all', 'hook' => 'cashflow_catalog_tick', 'group' => 'cashflow-catalog' ], $un, true ) );
+ok( 'and the picture job, in its own group', in_array( [ 'fn' => 'unschedule_all', 'hook' => 'cashflow_media_tick', 'group' => 'cashflow-media' ], $un, true ) );
+ok( 'and a follow-up picture run still waiting', in_array( [ 'fn' => 'unschedule_all', 'hook' => 'cashflow_media_follow_up', 'group' => 'cashflow-media' ], $un, true ) );
 
 summary();

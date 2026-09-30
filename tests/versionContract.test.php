@@ -21,6 +21,6 @@ ok( 'header Version equals CASHFLOW_VERSION', ( $h[1] ?? 'a' ) === ( $c[1] ?? 'b
     'header ' . ( $h[1] ?? '?' ) . ' vs constant ' . ( $c[1] ?? '?' ) );
 ok( 'the harness reports the same version the plugin does', CASHFLOW_VERSION === ( $c[1] ?? '' ),
     'harness ' . CASHFLOW_VERSION );
-ok( 'this release is 6.10.0 (a backlog of pictures is handed over in minutes, not one per five minutes)', ( $c[1] ?? '' ) === '6.10.0' );
+ok( 'this release is 6.11.0 (a backlog of pictures is handed over in minutes, not one per five minutes)', ( $c[1] ?? '' ) === '6.11.0' );
 
 summary();

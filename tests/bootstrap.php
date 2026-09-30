@@ -282,6 +282,7 @@ function set_url_scheme( $url, $scheme = null ) {
 function get_option( $k, $d = false ) { return CF_TestState::$options[ $k ] ?? $d; }
 function update_option( $k, $v ) { CF_TestState::$options[ $k ] = $v; return true; }
 function get_site_url() { return 'https://example.test'; }
+function get_bloginfo( $show = '' ) { return 'version' === $show ? '7.1.2' : 'https://example.test'; }
 function wp_json_encode( $v ) { return json_encode( $v ); }
 function is_wp_error( $t ) { return $t instanceof WP_Error; }
 function esc_html( $s ) { return htmlspecialchars( (string) $s, ENT_QUOTES ); }

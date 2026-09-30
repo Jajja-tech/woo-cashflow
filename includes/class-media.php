@@ -26,11 +26,14 @@ class CashFlow_Media {
     // urgent thing this plugin sends, and a fatal here must not stop either.
     const AS_PRIORITY = 30;
     const INTERVAL    = 300;
-    // A run that ends with pictures still waiting asks for another one this
-    // soon, on its own hook, instead of leaving them to the five-minute tick.
+    // A run that ends with pictures still waiting asks for another one at
+    // once, on its own hook, instead of leaving them to the five-minute tick.
+    // Action Scheduler passes its queue about once a minute, so "at once" is
+    // its next pass: measured on Zensha on 30 Sep 2026, a follow-up asked for
+    // 30 seconds on started 70 and 95 seconds after the run before it ended.
     // A shop with nothing waiting still asks CashFlow only every five minutes.
     const FOLLOW_HOOK    = 'cashflow_media_follow_up';
-    const FOLLOW_SECONDS = 30;
+    const FOLLOW_SECONDS = 0;
 
     const EP_WANTED = '/plugin/media/wanted';
     const EP_UPLOAD = '/plugin/media/upload';
@@ -45,6 +48,13 @@ class CashFlow_Media {
     // A later upload starts with less, and its timeout is cut to what is left,
     // so every upload still ends inside the budget.
     const MIN_LEFT_TO_START = 6;
+    // Pictures go to CashFlow this many at a time. One at a time, a run sent
+    // five (measured, same day: CashFlow answers one in 2.6 to 3.9 seconds),
+    // and five a run is 300 pictures in about 100 minutes.
+    const PARALLEL          = 5;
+    // One batch never holds more than this, so five large pictures are not
+    // all in memory at once. A picture over it goes alone.
+    const BATCH_BYTES       = 10485760;   // 10 MB
     const MAX_BYTES         = 20971520;   // 20 MB; CashFlow accepts up to 25
     // A picture this site could not read (moved, deleted, outside uploads) is
     // not offered again for a day, so one bad URL cannot hold every run.
@@ -54,6 +64,7 @@ class CashFlow_Media {
 
     // Test seams. Null = the real WordPress function.
     public static $http     = null;   // callable( $url, $args ) => wp_remote_request response
+    public static $http_many = null;  // callable( [ [ 'url', 'args' ], ... ] ) => responses, same keys
     public static $uploads  = null;   // [ 'baseurl' => ..., 'basedir' => ... ]
     public static $api_base = null;   // callable() => https origin
     public static $clock    = null;   // callable() => float seconds
@@ -113,53 +124,91 @@ class CashFlow_Media {
             $wanted = ( is_array( $res['data'] ?? null ) && is_array( $res['data']['wanted'] ?? null ) ) ? $res['data']['wanted'] : [];
 
             $round_sent = 0;
-            foreach ( $wanted as $item ) {
-                $url = is_array( $item ) ? (string) ( $item['url'] ?? '' ) : '';
-                if ( $url !== '' && isset( $named[ $url ] ) ) {
-                    continue;   // named again in a later ask of this run: already dealt with
+            $size       = self::batch_size();
+            $i          = 0;
+            $n          = count( $wanted );
+            while ( $i < $n ) {
+                // The next pictures of this list that can be sent, up to a batch.
+                $batch = [];
+                $bytes = 0;
+                $left  = self::BUDGET_SECONDS - ( self::now() - $started );
+                while ( $i < $n && count( $batch ) < $size ) {
+                    $item = $wanted[ $i ];
+                    $url  = is_array( $item ) ? (string) ( $item['url'] ?? '' ) : '';
+                    if ( $url !== '' && isset( $named[ $url ] ) ) {
+                        $i++;
+                        continue;   // named again in a later ask of this run: already dealt with
+                    }
+                    if ( $url === '' || isset( $skip[ $url ] ) ) {
+                        $named[ $url ] = true;
+                        $stats['asked']++;
+                        $stats['skipped']++;
+                        $i++;
+                        continue;
+                    }
+                    if ( [] === $batch && $left < self::needs( $first, $slowest ) ) {
+                        // Out of time with a picture in hand. After at least one
+                        // upload, the rest follow in a moment; before any, CashFlow
+                        // was slow to answer and the five-minute tick carries on.
+                        $named[ $url ] = true;
+                        $stats['asked']++;
+                        $stats['more'] = ! $first;
+                        break 3;
+                    }
+                    $file = self::local_file( $url );
+                    if ( null === $file ) {
+                        $named[ $url ] = true;
+                        $stats['asked']++;
+                        $skip[ $url ] = time();
+                        $stats['skipped']++;
+                        $i++;
+                        continue;
+                    }
+                    $weighs = (int) filesize( $file );
+                    if ( [] !== $batch && $bytes + $weighs > self::BATCH_BYTES ) {
+                        break;      // it goes first in the next batch
+                    }
+                    $named[ $url ] = true;
+                    $stats['asked']++;
+                    $batch[] = [ 'url' => $url, 'file' => $file ];
+                    $bytes  += $weighs;
+                    $i++;
                 }
-                $named[ $url ] = true;
-                $stats['asked']++;
-                if ( $url === '' || isset( $skip[ $url ] ) ) {
-                    $stats['skipped']++;
-                    continue;
+                if ( [] === $batch ) {
+                    break;
                 }
-                $left = self::BUDGET_SECONDS - ( self::now() - $started );
-                if ( $left < self::needs( $first, $slowest ) ) {
-                    // Out of time with a picture in hand. After at least one
-                    // upload, the rest follow in a moment; before any, CashFlow
-                    // was slow to answer and the five-minute tick carries on.
-                    $stats['more'] = ! $first;
-                    break 2;
-                }
-                $file = self::local_file( $url );
-                if ( null === $file ) {
-                    $skip[ $url ] = time();
-                    $stats['skipped']++;
-                    continue;
-                }
+
                 $timeout = $first ? self::UPLOAD_TIMEOUT : (int) min( self::UPLOAD_TIMEOUT, floor( $left ) - 1 );
                 $first   = false;
                 $began   = self::now();
-                $out     = self::upload( $secret, $url, $file, $timeout );
+                $outs    = self::upload_many( $secret, $batch, $timeout );
                 $slowest = max( $slowest, self::now() - $began );
-                if ( $out['sent'] ) {
-                    $stats['sent']++;
-                    $round_sent++;
-                    continue;
+                $cut     = false;
+                foreach ( $batch as $k => $sent ) {
+                    $out = $outs[ $k ];
+                    if ( $out['sent'] ) {
+                        $stats['sent']++;
+                        $round_sent++;
+                        continue;
+                    }
+                    if ( $out['no_answer'] && $timeout < self::UPLOAD_TIMEOUT ) {
+                        // Cut off by this run's own clock, not refused. It is
+                        // among the first pictures of the next run, with the
+                        // full timeout.
+                        $cut = true;
+                        continue;
+                    }
+                    // Refused or failed: not offered again today either way. A
+                    // refusal will not change by retrying; a failure gets its
+                    // retry tomorrow rather than on every run.
+                    $skip[ $sent['url'] ] = time();
+                    $stats['refused']++;
+                    $stats['error'] = $out['reason'];
                 }
-                if ( $out['no_answer'] && $timeout < self::UPLOAD_TIMEOUT ) {
-                    // Cut off by this run's own clock, not refused. It is the
-                    // first picture of the next run, with the full timeout.
+                if ( $cut ) {
                     $stats['more'] = true;
                     break 2;
                 }
-                // Refused or failed: not offered again today either way. A
-                // refusal will not change by retrying; a failure gets its
-                // retry tomorrow rather than on every run.
-                $skip[ $url ] = time();
-                $stats['refused']++;
-                $stats['error'] = $out['reason'];
             }
 
             // A short list is the end of what CashFlow needs. A full list that
@@ -181,9 +230,9 @@ class CashFlow_Media {
     }
 
     /**
-     * Seconds of budget an upload needs left before it may start. After the
-     * first, that is the longest upload seen in this run plus one: when
-     * CashFlow takes nine seconds a picture, a third upload is not started
+     * Seconds of budget a batch needs left before it may start. After the
+     * first, that is the longest batch seen in this run plus one: when
+     * CashFlow takes nine seconds to answer, a third batch is not started
      * with six seconds left only to be cut off.
      */
     private static function needs( $first, $slowest ) {
@@ -264,33 +313,54 @@ class CashFlow_Media {
     }
 
     /**
-     * [ 'sent' => bool, 'reason' => why not, 'no_answer' => true when no
-     * reply came back at all (a timeout, a dropped connection) ].
+     * How many pictures go at once. Five where this server can hold several
+     * requests open together (PHP's curl); one where it cannot, so a batch is
+     * never sent one after another on a clock meant for one upload.
      */
-    public static function upload( $secret, $url, $file, $timeout = self::UPLOAD_TIMEOUT ) {
-        $not = function ( $reason, $no_answer = false ) { return [ 'sent' => false, 'reason' => $reason, 'no_answer' => $no_answer ]; };
+    private static function batch_size() {
+        if ( null !== self::$http_many ) {
+            return self::PARALLEL;
+        }
+        if ( null === self::$http && function_exists( 'curl_multi_init' ) ) {
+            return self::PARALLEL;
+        }
+        return 1;
+    }
+
+    /** The request that hands one picture over, or the reason it cannot be made. */
+    private static function request_for( $secret, $url, $file, $timeout ) {
         $bytes = file_get_contents( $file );
         if ( false === $bytes || $bytes === '' ) {
-            return $not( 'could not read ' . basename( $file ) );
+            return 'could not read ' . basename( $file );
         }
         $site = CashFlow_Catalog::site();
         $base = null !== self::$api_base ? call_user_func( self::$api_base ) : CashFlow_Plugin::api_base();
-        $http = null !== self::$http ? self::$http : 'wp_remote_request';
-        $response = call_user_func( $http, $base . self::EP_UPLOAD, [
-            'method'  => 'POST',
-            'headers' => [
-                'Content-Type'           => self::mime_of( $file ),
-                'Authorization'          => 'Bearer ' . $secret,
-                'X-CashFlow-Site'        => get_site_url(),
-                'X-CashFlow-Siteurl'     => $site['siteurl'],
-                'X-CashFlow-Home'        => $site['home'],
-                'X-CashFlow-Source-Url'  => $url,
-                'X-Plugin-Version'       => CASHFLOW_VERSION,
+        return [
+            'url'  => $base . self::EP_UPLOAD,
+            'args' => [
+                'method'  => 'POST',
+                'headers' => [
+                    'Content-Type'           => self::mime_of( $file ),
+                    'Authorization'          => 'Bearer ' . $secret,
+                    'X-CashFlow-Site'        => get_site_url(),
+                    'X-CashFlow-Siteurl'     => $site['siteurl'],
+                    'X-CashFlow-Home'        => $site['home'],
+                    'X-CashFlow-Source-Url'  => $url,
+                    'X-Plugin-Version'       => CASHFLOW_VERSION,
+                ],
+                'body'      => $bytes,
+                'timeout'   => $timeout,
+                'sslverify' => true,
             ],
-            'body'      => $bytes,
-            'timeout'   => $timeout,
-            'sslverify' => true,
-        ] );
+        ];
+    }
+
+    /**
+     * [ 'sent' => bool, 'reason' => why not, 'no_answer' => true when no
+     * reply came back at all (a timeout, a dropped connection) ].
+     */
+    private static function outcome( $response, $file ) {
+        $not = function ( $reason, $no_answer = false ) { return [ 'sent' => false, 'reason' => $reason, 'no_answer' => $no_answer ]; };
         if ( is_wp_error( $response ) ) {
             return $not( $response->get_error_message(), true );
         }
@@ -299,6 +369,120 @@ class CashFlow_Media {
             return [ 'sent' => true, 'reason' => null, 'no_answer' => false ];
         }
         return $not( 'CashFlow refused ' . basename( $file ) . ' (HTTP ' . $code . ')' );
+    }
+
+    /** One picture. The outcome is described on outcome(). */
+    public static function upload( $secret, $url, $file, $timeout = self::UPLOAD_TIMEOUT ) {
+        $req = self::request_for( $secret, $url, $file, $timeout );
+        if ( ! is_array( $req ) ) {
+            return [ 'sent' => false, 'reason' => $req, 'no_answer' => false ];
+        }
+        $http = null !== self::$http ? self::$http : 'wp_remote_request';
+        return self::outcome( call_user_func( $http, $req['url'], $req['args'] ), $file );
+    }
+
+    /**
+     * A batch of pictures, all at once: [ [ 'url', 'file' ], ... ] in, one
+     * outcome per picture out, under the same keys. Every request has the
+     * same timeout, so the batch ends when the slowest of them does.
+     */
+    public static function upload_many( $secret, $batch, $timeout = self::UPLOAD_TIMEOUT ) {
+        if ( count( $batch ) < 2 && null === self::$http_many ) {
+            $outs = [];
+            foreach ( $batch as $k => $b ) {
+                $outs[ $k ] = self::upload( $secret, $b['url'], $b['file'], $timeout );
+            }
+            return $outs;
+        }
+        $outs = [];
+        $reqs = [];
+        foreach ( $batch as $k => $b ) {
+            $req = self::request_for( $secret, $b['url'], $b['file'], $timeout );
+            if ( is_array( $req ) ) {
+                $reqs[ $k ] = $req;
+            } else {
+                $outs[ $k ] = [ 'sent' => false, 'reason' => $req, 'no_answer' => false ];
+            }
+        }
+        if ( [] !== $reqs ) {
+            $many      = null !== self::$http_many ? self::$http_many : [ __CLASS__, 'curl_many' ];
+            $responses = call_user_func( $many, $reqs );
+            foreach ( $reqs as $k => $req ) {
+                $res        = is_array( $responses ) && array_key_exists( $k, $responses ) ? $responses[ $k ] : new WP_Error( 'http_request_failed', 'no answer was recorded for this picture' );
+                $outs[ $k ] = self::outcome( $res, $batch[ $k ]['file'] );
+            }
+        }
+        return $outs;
+    }
+
+    /**
+     * Several requests held open together with PHP's curl, answered in the
+     * shape wp_remote_request() answers one: [ 'response' => [ 'code' ],
+     * 'body' ] or a WP_Error. WordPress has no call that sends several
+     * requests at once, so this talks to curl itself, with the certificate
+     * list WordPress ships and certificate checking always on.
+     */
+    public static function curl_many( $reqs ) {
+        $mh      = curl_multi_init();
+        $handles = [];
+        $ca      = defined( 'ABSPATH' ) && defined( 'WPINC' ) ? ABSPATH . WPINC . '/certificates/ca-bundle.crt' : '';
+        foreach ( $reqs as $k => $req ) {
+            $headers = [ 'Expect:' ];
+            foreach ( $req['args']['headers'] as $name => $value ) {
+                $headers[] = $name . ': ' . $value;
+            }
+            $timeout = max( 1, (int) $req['args']['timeout'] );
+            $ch      = curl_init( $req['url'] );
+            curl_setopt_array( $ch, [
+                CURLOPT_CUSTOMREQUEST  => 'POST',
+                CURLOPT_POSTFIELDS     => $req['args']['body'],
+                CURLOPT_HTTPHEADER     => $headers,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_TIMEOUT        => $timeout,
+                CURLOPT_CONNECTTIMEOUT => min( 10, $timeout ),
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+                CURLOPT_USERAGENT      => 'WordPress/' . get_bloginfo( 'version' ) . '; ' . get_bloginfo( 'url' ),
+            ] );
+            if ( $ca !== '' && is_file( $ca ) ) {
+                curl_setopt( $ch, CURLOPT_CAINFO, $ca );
+            }
+            curl_multi_add_handle( $mh, $ch );
+            $handles[ $k ] = $ch;
+        }
+
+        $failed = [];   // key => curl's own error number, for a request that got no answer
+        do {
+            $status = curl_multi_exec( $mh, $running );
+            while ( $info = curl_multi_info_read( $mh ) ) {
+                if ( CURLE_OK !== $info['result'] ) {
+                    $k = array_search( $info['handle'], $handles, true );
+                    if ( false !== $k ) {
+                        $failed[ $k ] = $info['result'];
+                    }
+                }
+            }
+            if ( $running && CURLM_OK === $status ) {
+                if ( -1 === curl_multi_select( $mh, 1.0 ) ) {
+                    usleep( 50000 );
+                }
+            }
+        } while ( $running && CURLM_OK === $status );
+
+        $out = [];
+        foreach ( $handles as $k => $ch ) {
+            $code = (int) curl_getinfo( $ch, CURLINFO_HTTP_CODE );
+            if ( isset( $failed[ $k ] ) || 0 === $code ) {
+                $errno     = $failed[ $k ] ?? 0;
+                $out[ $k ] = new WP_Error( 'http_request_failed', 'cURL error ' . $errno . ': ' . ( curl_error( $ch ) ?: 'no answer' ) );
+            } else {
+                $out[ $k ] = [ 'response' => [ 'code' => $code ], 'body' => (string) curl_multi_getcontent( $ch ) ];
+            }
+            curl_multi_remove_handle( $mh, $ch );
+        }
+        curl_multi_close( $mh );
+        return $out;
     }
 
     private static function skip_list() {

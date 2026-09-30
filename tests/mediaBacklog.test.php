@@ -7,6 +7,10 @@
  * list when its upload is answered. Time is a clock the test owns: an ask and
  * an upload each move it by as long as they take, so a run's budget is spent
  * exactly as it would be on a shop.
+ *
+ * The first half sends one picture at a time, as a server without PHP's curl
+ * does. The second half sends five at once: a batch moves the clock by as long
+ * as its slowest picture takes, not by the sum.
  */
 
 require_once __DIR__ . '/bootstrap.php';
@@ -37,6 +41,38 @@ CashFlow_Media::$http     = function ( $url, $args ) {
     return [ 'response' => [ 'code' => 200 ], 'body' => '{}' ];
 };
 
+/** Five at once. $shop['batch_s'] says how long CashFlow takes to answer a batch of n. */
+function many_at_once( $on = true ) {
+    CashFlow_Media::$http_many = ! $on ? null : function ( $reqs ) {
+        global $shop, $clock;
+        $n       = count( $reqs );
+        $out     = [];
+        $longest = 0.0;
+        $shop['batches'][] = $n;
+        foreach ( $reqs as $k => $r ) {
+            $src     = $r['args']['headers']['X-CashFlow-Source-Url'];
+            $timeout = $r['args']['timeout'];
+            $takes   = $shop['slow'][ $src ] ?? call_user_func( $shop['batch_s'], $n );
+            $shop['uploads'][] = [ 'url' => $src, 'timeout' => $timeout, 'at' => $clock ];
+            if ( $takes > $timeout ) {
+                $longest   = max( $longest, (float) $timeout );
+                $out[ $k ] = new WP_Error( 'http_request_failed', 'cURL error 28: Operation timed out' );
+                continue;
+            }
+            $longest = max( $longest, (float) $takes );
+            if ( isset( $shop['refuse'][ $src ] ) ) {
+                $out[ $k ] = [ 'response' => [ 'code' => $shop['refuse'][ $src ] ], 'body' => '{}' ];
+                continue;
+            }
+            $shop['waiting']  = array_values( array_diff( $shop['waiting'], [ $src ] ) );
+            $shop['stored'][] = $src;
+            $out[ $k ] = [ 'response' => [ 'code' => 200 ], 'body' => '{}' ];
+        }
+        $clock += $longest;
+        return $out;
+    };
+}
+
 function picture( $i ) { return 'https://zensha.pk/wp-content/uploads/p' . $i . '.webp'; }
 
 /** CashFlow answers every ask: the first ten still waiting. */
@@ -62,7 +98,8 @@ function backlog( $n, $upload_s = 1.0, $wanted_s = 0.5 ) {
         'siteurl' => 'https://zensha.pk', 'home' => 'https://zensha.pk',
     ];
     $clock = 0.0;
-    $shop  = [ 'waiting' => [], 'stored' => [], 'uploads' => [], 'asks' => [], 'slow' => [], 'upload_s' => $upload_s, 'wanted_s' => $wanted_s ];
+    $shop  = [ 'waiting' => [], 'stored' => [], 'uploads' => [], 'asks' => [], 'slow' => [], 'refuse' => [], 'batches' => [], 'upload_s' => $upload_s, 'wanted_s' => $wanted_s,
+               'batch_s' => function ( $n ) use ( $upload_s ) { return $upload_s; } ];
     for ( $i = 1; $i <= $n; $i++ ) {
         $f = $root . '/uploads/p' . $i . '.webp';
         if ( ! is_file( $f ) ) { file_put_contents( $f, 'WEBP' . $i ); }
@@ -95,8 +132,8 @@ ok( 'the run ended inside its budget', $clock <= 25.0, (string) $clock );
 ok( 'it sent 19 of the 40', count( $shop['stored'] ) === 19, (string) count( $shop['stored'] ) );
 ok( 'and recorded that more are waiting', last_run()['more'] === true );
 $f = array_values( follow_ups() );
-ok( 'one follow-up run is asked for, 30 seconds on, in the picture job\'s own group and place in the queue',
-    count( $f ) === 1 && $f[0]['timestamp'] === (int) ceil( $clock ) + 30 && $f[0]['group'] === 'cashflow-media' && $f[0]['priority'] === 30, json_encode( $f ) );
+ok( 'one follow-up run is asked for, due at once, in the picture job\'s own group and place in the queue',
+    count( $f ) === 1 && $f[0]['timestamp'] === (int) ceil( $clock ) && $f[0]['group'] === 'cashflow-media' && $f[0]['priority'] === 30, json_encode( $f ) );
 
 echo "── CashFlow taking nine seconds a picture: no upload is started only to be cut off\n";
 backlog( 5, 9.0 );
@@ -177,52 +214,135 @@ CF_TestState::$api_responses['/plugin/media/wanted'] = [ function ( $call ) use 
 CashFlow_Media::run();
 ok( 'the ten already sent are counted, and the failure is on record', last_run()['sent'] === 10 && strpos( (string) last_run()['error'], 'down' ) !== false, json_encode( last_run() ) );
 
+// ───────────────────────── five at once ─────────────────────────
+many_at_once();
+
+echo "── five go at once, and a batch costs the time of its slowest picture\n";
+backlog( 12 );
+$shop['batch_s'] = function ( $n ) { return 5.0; };
+CashFlow_Media::run();
+ok( 'all 12 were sent in one run, as batches of 5, 5 and 2', count( $shop['stored'] ) === 12 && $shop['batches'] === [ 5, 5, 2 ], json_encode( $shop['batches'] ) );
+ok( 'three batches cost 15 seconds and two asks one, not twelve uploads\' worth', $clock === 16.0, (string) $clock );
+ok( 'every picture of the first batch had the full 20 seconds', array_column( array_slice( $shop['uploads'], 0, 5 ), 'timeout' ) === [ 20, 20, 20, 20, 20 ] );
+ok( 'nothing is left, so no further run is asked for', follow_ups() === [] && last_run()['more'] === false );
+
+echo "── a run of batches stops inside its 25 seconds and asks for the next one at once\n";
+backlog( 40 );
+$shop['batch_s'] = function ( $n ) { return 5.0; };
+CashFlow_Media::run();
+ok( 'it sent 20 of the 40 in four batches', count( $shop['stored'] ) === 20 && $shop['batches'] === [ 5, 5, 5, 5 ], json_encode( $shop['batches'] ) );
+ok( 'the run ended inside its budget', $clock <= 25.0, (string) $clock );
+ok( 'the last batch was given only what was left of the run, less one second', $shop['uploads'][19]['timeout'] === 8, json_encode( array_column( $shop['uploads'], 'timeout' ) ) );
+$f = array_values( follow_ups() );
+ok( 'the follow-up is due at once', last_run()['more'] === true && count( $f ) === 1 && $f[0]['timestamp'] === (int) ceil( $clock ), json_encode( $f ) );
+
+echo "── a batch slower than what is left is not started\n";
+backlog( 40 );
+$shop['batch_s'] = function ( $n ) { return 9.0; };
+CashFlow_Media::run();
+ok( 'two batches were sent; a third was not started with 6.5 seconds left', $shop['batches'] === [ 5, 5 ] && $clock === 18.5, json_encode( [ $shop['batches'], $clock ] ) );
+ok( 'nothing was set aside, and the rest follow', empty( CF_TestState::$options['cashflow_media_skip'] ) && count( follow_ups() ) === 1 );
+
+echo "── one picture of a batch cut off by the run's clock: the others count, it is not set aside\n";
+backlog( 20 );
+$shop['batch_s'] = function ( $n ) { return 7.0; };
+$shop['slow'][ picture( 13 ) ] = 12.0;               // third batch starts with 9.5 s left: cut at 8
+CashFlow_Media::run();
+ok( 'the other four of its batch were stored', count( $shop['stored'] ) === 14 && ! in_array( picture( 13 ), $shop['stored'], true ), (string) count( $shop['stored'] ) );
+ok( 'it is not refused and not set aside', last_run()['refused'] === 0 && ! isset( CF_TestState::$options['cashflow_media_skip'][ picture( 13 ) ] ), json_encode( last_run() ) );
+ok( 'the run ended there and asked for the next', last_run()['more'] === true && count( follow_ups() ) === 1 && $shop['batches'] === [ 5, 5, 5 ] );
+$clock = 200.0;
+$shop['uploads'] = [];
+CashFlow_Media::run();
+ok( 'the next run sends it in its first batch, with the full 20 seconds', $shop['uploads'][0]['url'] === picture( 13 ) && $shop['uploads'][0]['timeout'] === 20 && in_array( picture( 13 ), $shop['stored'], true ) );
+
+echo "── one picture of a batch refused: it alone is set aside\n";
+backlog( 5 );
+$shop['refuse'][ picture( 3 ) ] = 422;
+CashFlow_Media::run();
+ok( 'four stored, one refused with its reason', count( $shop['stored'] ) === 4 && last_run()['refused'] === 1 && strpos( (string) last_run()['error'], 'HTTP 422' ) !== false, json_encode( last_run() ) );
+ok( 'only the refused one is set aside', array_keys( CF_TestState::$options['cashflow_media_skip'] ) === [ picture( 3 ) ] );
+
+echo "── one picture of the first batch with no answer in the full 20 seconds is set aside, as one alone is\n";
+backlog( 5 );
+$shop['slow'][ picture( 2 ) ] = 30.0;
+CashFlow_Media::run();
+ok( 'it is set aside; the other four are stored', array_keys( CF_TestState::$options['cashflow_media_skip'] ) === [ picture( 2 ) ] && count( $shop['stored'] ) === 4, json_encode( last_run() ) );
+
+echo "── large pictures are not all held in memory at once\n";
+backlog( 0 );
+foreach ( [ 'big1' => 6, 'big2' => 6, 'big3' => 11 ] as $name => $mb ) {
+    file_put_contents( $root . '/uploads/p' . $name . '.webp', str_repeat( 'x', $mb * 1048576 ) );
+}
+$shop['waiting'] = [ picture( 'big1' ), picture( 'big2' ), picture( 1 ), picture( 'big3' ), picture( 2 ) ];
+file_put_contents( $root . '/uploads/p1.webp', 'WEBP1' );
+file_put_contents( $root . '/uploads/p2.webp', 'WEBP2' );
+CashFlow_Media::run();
+ok( 'two 6 MB pictures do not share a batch, and an 11 MB one goes alone', $shop['batches'] === [ 1, 2, 1, 1 ] && count( $shop['stored'] ) === 5, json_encode( $shop['batches'] ) );
+ok( 'in the order CashFlow named them', array_column( $shop['uploads'], 'url' ) === [ picture( 'big1' ), picture( 'big2' ), picture( 1 ), picture( 'big3' ), picture( 2 ) ] );
+foreach ( [ 'big1', 'big2', 'big3' ] as $name ) { unlink( $root . '/uploads/p' . $name . '.webp' ); }
+
+echo "── a server that cannot hold several requests open sends one at a time\n";
+many_at_once( false );
+backlog( 12 );
+CashFlow_Media::run();
+ok( 'twelve uploads, one after another', count( $shop['stored'] ) === 12 && $shop['batches'] === [] && $clock === 13.0, (string) $clock );
+
 /**
- * The whole backlog, run by run, as Action Scheduler would run it: its queue
- * is passed once a minute; the five-minute tick is due on every fifth pass and
- * a follow-up on the first pass at or after its time. Counted from the tick
- * that first finds the backlog. Answers the seconds until nothing is waiting.
+ * The whole backlog, run by run. The first run is the five-minute tick that
+ * finds it. Each run after starts $gap seconds after the run before it ended:
+ * that is how long Action Scheduler took to come round to a follow-up on
+ * Zensha on 30 Sep 2026 (70 and 95 seconds, read from CashFlow's request
+ * log). Answers the seconds until nothing is waiting.
  */
-function drain( $n, $upload_s, $wanted_s = 0.5 ) {
+function drain( $n, $gap, $batch_s = null, $upload_s = 1.0 ) {
     global $shop, $clock;
-    backlog( $n, $upload_s, $wanted_s );
+    backlog( $n, $upload_s );
+    if ( null !== $batch_s ) { $shop['batch_s'] = $batch_s; }
     $longest = 0.0;
-    for ( $pass = 0; $pass <= 4 * 3600; $pass += 60 ) {
-        if ( $clock > $pass ) { continue; }                     // the last pass is still running
-        $clock = (float) $pass;
-        $due   = ( 0 === $pass % 300 ) ? [ 'tick' ] : [];
-        foreach ( follow_ups() as $id => $a ) {
-            if ( $a['timestamp'] <= $pass ) { $due[] = $id; }
-        }
-        foreach ( $due as $d ) {
-            if ( 'tick' !== $d ) { CF_TestState::$as_singles[ $d ]['status'] = 'in-progress'; }
-            $began = $clock;
-            CashFlow_Media::run();
-            $longest = max( $longest, $clock - $began );
-            if ( 'tick' !== $d ) { CF_TestState::$as_singles[ $d ]['status'] = 'complete'; }
-        }
+    $runs    = 0;
+    $id      = null;
+    while ( $runs < 2000 ) {
+        $began = $clock;
+        CashFlow_Media::run();
+        $runs++;
+        $longest = max( $longest, $clock - $began );
+        if ( null !== $id ) { CF_TestState::$as_singles[ $id ]['status'] = 'complete'; }
         if ( [] === $shop['waiting'] ) {
-            return [ 'seconds' => $clock, 'longest_run' => $longest ];
+            return [ 'seconds' => $clock, 'longest_run' => $longest, 'runs' => $runs ];
         }
+        $id = array_key_first( follow_ups() );
+        if ( null === $id ) {
+            $clock = ( floor( $clock / 300 ) + 1 ) * 300.0;      // no follow-up: the next five-minute tick
+            continue;
+        }
+        $clock += $gap;
+        CF_TestState::$as_singles[ $id ]['status'] = 'in-progress';
     }
-    return [ 'seconds' => INF, 'longest_run' => $longest ];
+    return [ 'seconds' => INF, 'longest_run' => $longest, 'runs' => $runs ];
 }
 
 echo "── 300 pictures waiting are all with CashFlow inside an hour\n";
-// How long the hour takes depends on how long CashFlow takes to answer one
-// upload, because the pictures go one at a time. Read from CashFlow's request
-// log on 30 Sep 2026: 0.9 s for a picture whose bytes it already held, and
-// 9.3 s for a new one while its server uploaded the eight sizes one after
-// another. Four seconds a picture is the slowest at which the hour is met.
-$r = drain( 300, 4.0 );
-ok( 'all 300 are stored, each exactly once', count( $shop['stored'] ) === 300 && count( array_unique( $shop['stored'] ) ) === 300, (string) count( $shop['stored'] ) );
-ok( 'inside an hour, at four seconds a picture', $r['seconds'] <= 3600, $r['seconds'] . ' s' );
+// Measured on Zensha on 30 Sep 2026 with plugin 6.10.0, one picture at a time:
+// CashFlow answered an upload in 2.6 to 3.9 seconds, a run sent five, and the
+// next run started 70 and 95 seconds after the last ended. Every case below
+// waits the longer of the two, 95 seconds, between runs.
+$r = drain( 300, 95, null, 3.9 );
+ok( 'one at a time at the measured 3.9 seconds does NOT make the hour: what 6.10.0 did live',
+    $r['seconds'] > 3600 && count( $shop['stored'] ) === 300, $r['seconds'] . ' s in ' . $r['runs'] . ' runs' );
+
+many_at_once();
+$r = drain( 300, 95, function ( $n ) { return 6.0; } );
+ok( 'five at once: all 300 are stored, each exactly once', count( $shop['stored'] ) === 300 && count( array_unique( $shop['stored'] ) ) === 300, (string) count( $shop['stored'] ) );
+ok( 'inside an hour when CashFlow answers a batch of five within six seconds', $r['seconds'] <= 3600, $r['seconds'] . ' s in ' . $r['runs'] . ' runs' );
 ok( 'no run went past its 25 seconds', $r['longest_run'] <= 25.0, (string) $r['longest_run'] );
 ok( 'no upload was ever given more than 20 seconds', max( array_column( $shop['uploads'], 'timeout' ) ) <= 20 );
-$r = drain( 300, 2.0 );
-ok( 'in half an hour, at two seconds a picture', $r['seconds'] <= 1800, $r['seconds'] . ' s' );
-$r = drain( 300, 9.3 );
-ok( 'at 9.3 seconds a picture the plugin cannot make the hour: that half is the server\'s', $r['seconds'] > 3600 && count( $shop['stored'] ) === 300, $r['seconds'] . ' s' );
+$r = drain( 300, 95, function ( $n ) { return 9.0; } );
+ok( 'and still inside an hour at nine seconds a batch', $r['seconds'] <= 3600, $r['seconds'] . ' s in ' . $r['runs'] . ' runs' );
+$r = drain( 300, 95, function ( $n ) { return 3.9 * $n; } );
+ok( 'but not if five at once are no faster than five in a row: the hour needs CashFlow to work on them together',
+    $r['seconds'] > 3600 && count( $shop['stored'] ) === 300, $r['seconds'] . ' s in ' . $r['runs'] . ' runs' );
+many_at_once( false );
 
 array_map( 'unlink', glob( $root . '/uploads/*' ) );
 summary();
